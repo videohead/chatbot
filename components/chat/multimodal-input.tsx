@@ -405,10 +405,21 @@ function PureMultimodalInput({
     }
     if (status === "ready" || status === "error") {
       submitForm();
+    } else if (status === "submitted" || status === "streaming") {
+      // Interrupt the in-progress response and steer with the new message.
+      stop();
+      submitForm();
     } else {
       toast.error("Please wait for the model to finish its response!");
     }
-  }, [attachments.length, handleSlashSelect, input, status, submitForm]);
+  }, [
+    attachments.length,
+    handleSlashSelect,
+    input,
+    status,
+    stop,
+    submitForm,
+  ]);
 
   const handleTextareaKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -556,8 +567,16 @@ function PureMultimodalInput({
             />
           </PromptInputTools>
 
-          {status === "submitted" ? (
-            <StopButton setMessages={setMessages} stop={stop} />
+          {status === "submitted" || status === "streaming" ? (
+            input.trim() ? (
+              <SteerButton
+                setMessages={setMessages}
+                stop={stop}
+                submitForm={submitForm}
+              />
+            ) : (
+              <StopButton setMessages={setMessages} stop={stop} />
+            )
           ) : (
             <PromptInputSubmit
               className={cn(
@@ -929,14 +948,56 @@ function PureStopButton({
   );
 
   return (
-    <Button
-      className="h-7 w-7 rounded-xl bg-foreground p-1 text-background transition-all duration-200 hover:opacity-85 active:scale-95 disabled:bg-muted disabled:text-muted-foreground/25 disabled:cursor-not-allowed"
-      data-testid="stop-button"
-      onClick={handleClick}
-    >
-      <StopIcon size={14} />
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          className="h-7 w-7 rounded-xl bg-foreground p-1 text-background transition-all duration-200 hover:opacity-85 active:scale-95 disabled:bg-muted disabled:text-muted-foreground/25 disabled:cursor-not-allowed"
+          data-testid="stop-button"
+          onClick={handleClick}
+        >
+          <StopIcon size={14} />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Stop generating</TooltipContent>
+    </Tooltip>
   );
 }
 
 const StopButton = memo(PureStopButton);
+
+function PureSteerButton({
+  stop,
+  submitForm,
+  setMessages,
+}: {
+  stop: () => void;
+  submitForm: () => void;
+  setMessages: UseChatHelpers<ChatMessage>["setMessages"];
+}) {
+  const handleClick = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      stop();
+      setMessages((messages) => messages);
+      submitForm();
+    },
+    [setMessages, stop, submitForm]
+  );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          className="h-7 w-7 rounded-xl bg-foreground p-1 text-background transition-all duration-200 hover:opacity-85 active:scale-95"
+          data-testid="steer-button"
+          onClick={handleClick}
+        >
+          <ArrowUpIcon className="size-4" />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Interrupt and send</TooltipContent>
+    </Tooltip>
+  );
+}
+
+const SteerButton = memo(PureSteerButton);

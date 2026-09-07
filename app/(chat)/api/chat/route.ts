@@ -22,6 +22,7 @@ import {
 } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
+import { connectMetisGateway } from "@/lib/ai/mcp";
 import { createDocument } from "@/lib/ai/tools/create-document";
 import { editDocument } from "@/lib/ai/tools/edit-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
@@ -47,7 +48,8 @@ import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
-export const maxDuration = 60;
+// Next.js requires a static literal here; long-running agent runs need the headroom.
+export const maxDuration = 3600;
 
 const HEALTH_CHECK_DELAY_MS = 9000;
 
@@ -81,14 +83,7 @@ export async function POST(request: Request) {
     const { id, message, messages, selectedChatModel, selectedVisibilityType } =
       requestBody;
 
-    const [botIdResult, session] = await Promise.all([
-      checkBotId().catch(() => null),
-      auth(),
-    ]);
-
-    if (botIdResult?.isBot) {
-      return new ChatbotError("forbidden:api").toResponse();
-    }
+    const session = await auth();
 
     if (!session?.user) {
       return new ChatbotError("unauthorized:chat").toResponse();
@@ -206,11 +201,11 @@ export async function POST(request: Request) {
       execute: async ({ writer: dataStream }) => {
         const modelName = modelConfig?.name ?? chatModel;
         let hasModelActivity = false;
-        let healthCheckTimer: ReturnType<typeof setTimeout> | undefined;
+        let healthCheckTimer: ReturnType<typeof setInterval> | undefined;
 
         const clearHealthCheckTimer = () => {
           if (healthCheckTimer) {
-            clearTimeout(healthCheckTimer);
+            clearInterval(healthCheckTimer);
           }
         };
 
@@ -235,7 +230,9 @@ export async function POST(request: Request) {
 
         writeWaitingStatus("waiting", "Waiting...");
 
-        healthCheckTimer = setTimeout(() => {
+        // Recurs so the status stays fresh right up until the chunkMs
+        // timeout aborts the run, instead of going stale after one check.
+        healthCheckTimer = setInterval(() => {
           getModelAvailability(chatModel)
             .then((availability) => {
               if (availability === "impacted") {
@@ -266,22 +263,19 @@ export async function POST(request: Request) {
           clearHealthCheckTimer();
         };
 
+        const mcpSession = await connectMetisGateway();
+
         const result = streamText({
-          activeTools:
-            isReasoningModel && !supportsTools
-              ? []
-              : [
-                  "getWeather",
-                  "createDocument",
-                  "editDocument",
-                  "updateDocument",
-                  "requestSuggestions",
-                ],
+          // Omitted entirely when tools are usable, so MCP gateway tools stay active.
+          ...(isReasoningModel && !supportsTools
+            ? { activeTools: [] as const }
+            : {}),
           instructions: systemPrompt({ requestHints, supportsTools }),
           messages: modelMessages,
           model: getLanguageModel(chatModel),
           onAbort() {
             stopWaitingStatus();
+            void mcpSession.close();
           },
           onChunk({ chunk }) {
             if (isModelStreamActivity(chunk)) {
@@ -290,9 +284,11 @@ export async function POST(request: Request) {
           },
           onEnd() {
             stopWaitingStatus();
+            void mcpSession.close();
           },
           onError() {
             stopWaitingStatus();
+            void mcpSession.close();
           },
           providerOptions: {
             ...(modelConfig?.gatewayOrder && {
@@ -302,12 +298,22 @@ export async function POST(request: Request) {
               openai: { reasoningEffort: modelConfig.reasoningEffort },
             }),
           },
-          stopWhen: isStepCount(5),
+          stopWhen: isStepCount(
+            Number.parseInt(process.env.MAX_AGENT_STEPS ?? "25", 10)
+          ),
           telemetry: {
             functionId: "stream-text",
             isEnabled: isProductionEnvironment,
           },
+          // Aborts a stalled run instead of hanging silently until maxDuration:
+          // no stream chunk for chunkMs, or a single tool stuck for toolMs.
+          timeout: {
+            chunkMs: 60_000,
+            toolMs: 5 * 60_000,
+            totalMs: maxDuration * 1000,
+          },
           tools: {
+            ...mcpSession.tools,
             createDocument: createDocument({
               dataStream,
               modelId: chatModel,
@@ -332,6 +338,13 @@ export async function POST(request: Request) {
           toUIMessageStream({
             sendReasoning: isReasoningModel,
             stream: result.stream,
+            // Default onError sanitizes to "An error occurred." and hides the
+            // real cause from server logs. Log the underlying error and rethrow
+            // it so the outer handler can format it.
+            onError: (error) => {
+              console.error("Model stream error:", error);
+              throw error;
+            },
           })
         );
 
@@ -389,6 +402,7 @@ export async function POST(request: Request) {
         }
       },
       onError: (error) => {
+        console.error("Chat stream error:", error);
         if (
           error instanceof Error &&
           error.message?.includes(
@@ -396,6 +410,9 @@ export async function POST(request: Request) {
           )
         ) {
           return "AI Gateway requires a valid credit card on file to service requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card to add a card and unlock your free credits.";
+        }
+        if (error instanceof DOMException && error.name === "TimeoutError") {
+          return "The agent stopped responding and was cancelled after a period of inactivity. Please try again.";
         }
         return "Oops, an error occurred!";
       },

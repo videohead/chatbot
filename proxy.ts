@@ -13,6 +13,11 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Identity selection must be reachable before any session exists.
+  if (pathname === "/identity" || pathname === "/api/identities") {
+    return NextResponse.next();
+  }
+
   const token = await getToken({
     req: request,
     secret: process.env.AUTH_SECRET,

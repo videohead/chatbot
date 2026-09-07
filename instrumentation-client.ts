@@ -1,10 +1,3 @@
-import { initBotId } from "botid/client/core";
+// BotID is Vercel-only; self-hosted deployment sits behind Traefik instead.
+export {};
 
-initBotId({
-  protect: [
-    {
-      method: "POST",
-      path: "/api/chat",
-    },
-  ],
-});

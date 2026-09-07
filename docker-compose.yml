@@ -1,0 +1,49 @@
+services:
+  openharness-chat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/harness}
+    image: openharness-chat:latest
+    container_name: openharness-chat
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:15000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH:-/harness}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - AUTH_TRUST_HOST=true
+      - POSTGRES_URL=postgresql://openharness:openharness_pass@openharness-postgres:5432/openharness_db
+      # db 0 holds openharness job state; chat streams are isolated on db 1.
+      - REDIS_URL=redis://openharness-redis:6379/1
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://videohead.duckdns.org/vllm/v1}
+      - QWEN_BASE_URL=${QWEN_BASE_URL:-http://10.0.0.250:11434/v1}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-not-needed}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-oss-20b}
+      - MAX_AGENT_STEPS=${MAX_AGENT_STEPS:-100}
+      - MAX_MESSAGES_PER_HOUR=${MAX_MESSAGES_PER_HOUR:-1000000}
+      - MAX_MESSAGES_PER_IP_PER_HOUR=${MAX_MESSAGES_PER_IP_PER_HOUR:-1000000}
+      - MAX_REQUEST_DURATION_SECONDS=${MAX_REQUEST_DURATION_SECONDS:-3600}
+      - METIS_MCP_URL=${METIS_MCP_URL:-http://metis-server:9999/mcp}
+      - OPENHARNESS_MCP_URL=${OPENHARNESS_MCP_URL:-http://openharness-mcp:8940/mcp}
+      - UPLOAD_DIR=/data/uploads
+      - MAX_AGENT_STEPS=${MAX_AGENT_STEPS:-25}
+    volumes:
+      - openharness-chat-uploads:/data/uploads
+      - /opt:/opt
+      - /etc/passwd:/etc/passwd:ro
+    extra_hosts:
+      - "videohead.duckdns.org:host-gateway"
+      - "host.docker.internal:host-gateway"
+    networks:
+      - metis-network
+
+networks:
+  metis-network:
+    name: metis-network
+    external: true
+
+volumes:
+  openharness-chat-uploads:

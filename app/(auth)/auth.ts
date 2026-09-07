@@ -3,7 +3,12 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { DUMMY_PASSWORD } from "@/lib/constants";
-import { createGuestUser, getUser } from "@/lib/db/queries";
+import {
+  createGuestUser,
+  getOrCreateUnixUser,
+  getUser,
+} from "@/lib/db/queries";
+import { isValidUnixIdentity } from "@/lib/unix-users";
 import { authConfig } from "./auth.config";
 
 export type UserType = "guest" | "regular";
@@ -94,6 +99,24 @@ export const {
       },
       credentials: {},
       id: "guest",
+    }),
+    // Identification only, not authentication: any visitor may claim any listed
+    // identity. This exists to scope chat history, not to restrict access.
+    Credentials({
+      async authorize(credentials) {
+        const username = String(credentials.username ?? "");
+
+        if (!(await isValidUnixIdentity(username))) {
+          return null;
+        }
+
+        const [unixUser] = await getOrCreateUnixUser(username);
+        return { ...unixUser, type: "regular" };
+      },
+      credentials: {
+        username: { label: "Identity", type: "text" },
+      },
+      id: "unix",
     }),
   ],
 });

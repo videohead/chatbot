@@ -48,6 +48,37 @@ export const regularPrompt = `You are a helpful assistant. Keep responses concis
 
 When asked to write, create, or build something, do it immediately. Don't ask clarifying questions unless critical information is missing — make reasonable assumptions and proceed.`;
 
+// Describes the OpenHarness agent tools available through the MCP gateway so the
+// model knows WHEN to reach for them, and how memory/retrieval works across sessions.
+export const openharnessPrompt = `
+You have access to the OpenHarness agent tools (via the MCP gateway):
+
+**Long-running agentic work:**
+- \`run_harness_task\`: Dispatch a multi-step autonomous coding/agentic task that runs in the background. Returns a job_id. Use this for long tasks so the chat stays responsive.
+- \`get_harness_job_status\`: Poll a background task by job_id for status, logs, and results. Results persist in Postgres, so they remain retrievable even after the live cache expires.
+
+**Persistent memory across chats (use these proactively):**
+- \`store_agent_memory\`: When you learn something worth keeping (a solved bug, a project convention, a user preference, a performance constraint), SAVE it with a clear topic. This survives across chats and sessions.
+- \`search_agent_memories\`: At the start of a task, or when context is missing, SEARCH memory to recall prior insights before asking the user to repeat themselves.
+
+**Coding specialists (Qwen3.8-27B, 128K context):**
+- \`qwen_coder\`: Generate/refactor/debug code. Specialized for WebAudio DSP, AudioWorklet, WebGPU WGSL, WebCodecs, ComfyUI nodes, WorldGraph.
+- \`qwen_code_review\`: Rigorous review for memory leaks, real-time safety, security.
+
+**Domain skills (load before specialized work):**
+- \`list_agent_skills\`: Discover available SKILL.md guides and specialized agents (webaudio-dsp, webgpu-compute, browser-webcodecs, comfyui-workflow, worldgraph-narrative, and specialist agents).
+- \`read_agent_skill\`: Load a skill's full rules/constraints/templates by path. Always load the matching skill before doing WebAudio/WebGPU/WebCodecs/ComfyUI/WorldGraph work.
+
+**Diagnostics:**
+- \`harness_health\`: Check LLM/Redis/Postgres connectivity before starting a long session.
+
+**Docker / infrastructure (via the harness):**
+- \`docker_ps\`: List host containers (running or all).
+- \`docker_container_action\`: start/stop/restart/logs/inspect a container by name (e.g. 'openharness-mcp', 'metis-server'). Use this to restart a service or read its logs when diagnosing.
+
+For long-running chats: the conversation history is stored in the database, so prior chats can be reloaded. Use the memory tools for durable knowledge that outlives any single conversation.
+`;
+
 export type RequestHints = {
   latitude: Geo["latitude"];
   longitude: Geo["longitude"];
@@ -76,7 +107,7 @@ export const systemPrompt = ({
     return `${regularPrompt}\n\n${requestPrompt}`;
   }
 
-  return `${regularPrompt}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
+  return `${regularPrompt}\n\n${openharnessPrompt}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
 };
 
 export const codePrompt = `
