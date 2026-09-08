@@ -68,8 +68,15 @@ const CONTEXT_OVERHEAD_TOKENS = Number.parseInt(
   process.env.OPENHARNESS_CONTEXT_OVERHEAD_TOKENS ?? "32768",
   10
 );
+const CONTEXT_SAFETY_MARGIN_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_CONTEXT_SAFETY_MARGIN_TOKENS ?? "8192",
+  10
+);
 const DEFAULT_CONTEXT_INPUT_TOKENS =
-  MODEL_CONTEXT_WINDOW_TOKENS - MODEL_OUTPUT_TOKENS - CONTEXT_OVERHEAD_TOKENS;
+  MODEL_CONTEXT_WINDOW_TOKENS -
+  MODEL_OUTPUT_TOKENS -
+  CONTEXT_OVERHEAD_TOKENS -
+  CONTEXT_SAFETY_MARGIN_TOKENS;
 const MAX_CONTEXT_INPUT_TOKENS = Math.min(
   Number.parseInt(
     process.env.OPENHARNESS_AUTO_COMPACT_THRESHOLD_TOKENS ??
@@ -168,6 +175,59 @@ function estimateTokenCount(messages: ModelMessage[]): number {
   return Math.ceil(JSON.stringify(messages).length / 2);
 }
 
+function compactTextToTokenBudget(text: string, budgetTokens: number): string {
+  if (Math.ceil(text.length / 2) <= budgetTokens) {
+    return text;
+  }
+
+  const budgetChars = Math.max(512, budgetTokens * 2);
+  const notice = "\n\n[OpenHarness Chat compacted earlier content from this oversized message.]\n\n";
+  const headChars = Math.max(0, Math.floor((budgetChars - notice.length) * 0.35));
+  const tailChars = Math.max(0, budgetChars - notice.length - headChars);
+  return `${text.slice(0, headChars)}${notice}${text.slice(-tailChars)}`;
+}
+
+function compactMessageContentToTokenBudget(
+  message: ModelMessage,
+  budgetTokens: number
+): ModelMessage {
+  const content = message.content;
+
+  if (typeof content === "string") {
+    if (message.role === "tool") {
+      return message;
+    }
+    return {
+      ...message,
+      content: compactTextToTokenBudget(content, budgetTokens),
+    } as ModelMessage;
+  }
+
+  if (!Array.isArray(content)) {
+    return message;
+  }
+
+  const remainingBudget = { tokens: budgetTokens };
+  return {
+    ...message,
+    content: content.map((part) => {
+      if (!part || typeof part !== "object" || !("text" in part)) {
+        return part;
+      }
+      const text = part.text;
+      if (typeof text !== "string") {
+        return part;
+      }
+      const compacted = compactTextToTokenBudget(text, remainingBudget.tokens);
+      remainingBudget.tokens = Math.max(
+        0,
+        remainingBudget.tokens - Math.ceil(compacted.length / 2)
+      );
+      return { ...part, text: compacted };
+    }),
+  } as ModelMessage;
+}
+
 function compactModelMessages(messages: ModelMessage[]): {
   messages: ModelMessage[];
   instructions?: string;
@@ -200,8 +260,38 @@ function compactModelMessages(messages: ModelMessage[]): {
 
   return {
     instructions: CONTEXT_COMPACTION_NOTICE,
-    messages: prunedMessages.slice(firstRetainedIndex),
+    messages: compactOversizedRetainedMessages(
+      prunedMessages.slice(firstRetainedIndex),
+      MAX_CONTEXT_INPUT_TOKENS
+    ),
   };
+}
+
+function compactOversizedRetainedMessages(
+  messages: ModelMessage[],
+  budgetTokens: number
+): ModelMessage[] {
+  if (estimateTokenCount(messages) <= budgetTokens) {
+    return messages;
+  }
+
+  const retainedMessages = [...messages];
+  while (
+    retainedMessages.length > 1 &&
+    estimateTokenCount(retainedMessages) > budgetTokens
+  ) {
+    retainedMessages.shift();
+  }
+
+  if (estimateTokenCount(retainedMessages) <= budgetTokens) {
+    return retainedMessages;
+  }
+
+  return retainedMessages.map((message, index) =>
+    index === retainedMessages.length - 1
+      ? compactMessageContentToTokenBudget(message, Math.floor(budgetTokens * 0.85))
+      : message
+  );
 }
 
 function getStreamContext() {
