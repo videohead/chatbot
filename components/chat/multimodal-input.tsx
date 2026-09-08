@@ -43,7 +43,7 @@ import {
   DEFAULT_CHAT_MODEL,
   type ModelCapabilities,
 } from "@/lib/ai/models";
-import type { Attachment, ChatMessage } from "@/lib/types";
+import type { AgentExecutionMode, Attachment, ChatMessage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   PromptInput,
@@ -88,6 +88,8 @@ function PureMultimodalInput({
   editingMessage,
   onCancelEdit,
   isLoading,
+  agentMode,
+  onAgentModeChange,
 }: {
   chatId: string;
   input: string;
@@ -108,6 +110,8 @@ function PureMultimodalInput({
   editingMessage?: ChatMessage | null;
   onCancelEdit?: () => void;
   isLoading?: boolean;
+  agentMode: AgentExecutionMode;
+  onAgentModeChange: (mode: AgentExecutionMode) => void;
 }) {
   const router = useRouter();
   const { setTheme, resolvedTheme } = useTheme();
@@ -565,6 +569,7 @@ function PureMultimodalInput({
               onModelChange={onModelChange}
               selectedModelId={selectedModelId}
             />
+            <AgentModeSelector mode={agentMode} onModeChange={onAgentModeChange} />
           </PromptInputTools>
 
           {status === "submitted" || status === "streaming" ? (
@@ -615,6 +620,9 @@ export const MultimodalInput = memo(
       return false;
     }
     if (prevProps.selectedModelId !== nextProps.selectedModelId) {
+      return false;
+    }
+    if (prevProps.agentMode !== nextProps.agentMode) {
       return false;
     }
     if (prevProps.editingMessage !== nextProps.editingMessage) {
@@ -699,6 +707,71 @@ function PureAttachmentsButton({
 }
 
 const AttachmentsButton = memo(PureAttachmentsButton);
+
+const agentModeOptions: {
+  description: string;
+  label: string;
+  value: AgentExecutionMode;
+}[] = [
+  {
+    description: "Direct model chat without MCP tools.",
+    label: "Direct",
+    value: "direct",
+  },
+  {
+    description: "Use OpenHarness tools via the Metis Router gateway.",
+    label: "Harness",
+    value: "openharness",
+  },
+  {
+    description: "Use OpenHarness to dispatch a task through Microsoft Agent Framework context providers.",
+    label: "MAF",
+    value: "maf",
+  },
+  {
+    description: "Use the Metis Router gateway for cross-service MCP tools.",
+    label: "MCP",
+    value: "mcp",
+  },
+];
+
+function AgentModeSelector({
+  mode,
+  onModeChange,
+}: {
+  mode: AgentExecutionMode;
+  onModeChange: (mode: AgentExecutionMode) => void;
+}) {
+  return (
+    <div
+      aria-label="Task execution mode"
+      className="flex h-7 items-center rounded-lg border border-border/40 p-0.5"
+      role="radiogroup"
+    >
+      {agentModeOptions.map((option) => (
+        <Tooltip key={option.value}>
+          <TooltipTrigger asChild>
+            <button
+              aria-checked={mode === option.value}
+              className={cn(
+                "h-5 rounded-md px-1.5 text-[10px] transition-colors",
+                mode === option.value
+                  ? "bg-foreground text-background"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              )}
+              onClick={() => onModeChange(option.value)}
+              role="radio"
+              type="button"
+            >
+              {option.label}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">{option.description}</TooltipContent>
+        </Tooltip>
+      ))}
+    </div>
+  );
+}
 
 function ModelSelectorOption({
   capabilities,

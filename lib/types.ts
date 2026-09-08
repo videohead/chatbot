@@ -13,6 +13,8 @@ export const messageMetadataSchema = z.object({
 
 export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
 
+export type AgentExecutionMode = "direct" | "openharness" | "maf" | "mcp";
+
 type weatherTool = InferUITool<typeof getWeather>;
 type createDocumentTool = InferUITool<ReturnType<typeof createDocument>>;
 type updateDocumentTool = InferUITool<ReturnType<typeof updateDocument>>;
@@ -28,7 +30,7 @@ export type ChatTools = {
 };
 
 export type WaitingStatusData = {
-  phase: "waiting" | "still-waiting" | "health" | "thinking";
+  phase: "waiting" | "still-waiting" | "health" | "thinking" | "unavailable";
   message: string;
   modelId: string;
   modelName: string;

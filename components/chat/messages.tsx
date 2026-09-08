@@ -7,7 +7,11 @@ import type { ChatMessage } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useDataStream } from "./data-stream-provider";
 import { Greeting } from "./greeting";
-import { PreviewMessage, ThinkingMessage } from "./message";
+import {
+  PreviewMessage,
+  ThinkingMessage,
+  UnavailableMessage,
+} from "./message";
 
 type MessagesProps = {
   addToolApprovalResponse: UseChatHelpers<ChatMessage>["addToolApprovalResponse"];
@@ -106,6 +110,8 @@ function PureMessages({
           {status === "submitted" && messages.at(-1)?.role !== "assistant" && (
             <ThinkingMessage />
           )}
+
+          {status === "error" && <UnavailableMessage />}
 
           <div
             className="min-h-[24px] min-w-[24px] shrink-0"

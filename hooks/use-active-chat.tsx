@@ -22,10 +22,10 @@ import { getChatHistoryPaginationKey } from "@/components/chat/sidebar-history";
 import { toast } from "@/components/chat/toast";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { useAutoResume } from "@/hooks/use-auto-resume";
-import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
+import { chatModels, DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
 import type { Vote } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
-import type { ChatMessage } from "@/lib/types";
+import type { AgentExecutionMode, ChatMessage } from "@/lib/types";
 import { fetcher, fetchWithErrorHandlers, generateUUID } from "@/lib/utils";
 
 type ActiveChatContextValue = {
@@ -45,6 +45,8 @@ type ActiveChatContextValue = {
   votes: Vote[] | undefined;
   currentModelId: string;
   setCurrentModelId: (id: string) => void;
+  agentMode: AgentExecutionMode;
+  setAgentMode: (mode: AgentExecutionMode) => void;
   showCreditCardAlert: boolean;
   setShowCreditCardAlert: Dispatch<SetStateAction<boolean>>;
 };
@@ -78,6 +80,11 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     currentModelIdRef.current = currentModelId;
   }, [currentModelId]);
+  const [agentMode, setAgentMode] = useState<AgentExecutionMode>("direct");
+  const agentModeRef = useRef(agentMode);
+  useEffect(() => {
+    agentModeRef.current = agentMode;
+  }, [agentMode]);
 
   const [input, setInput] = useState("");
   const [showCreditCardAlert, setShowCreditCardAlert] = useState(false);
@@ -118,6 +125,17 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
       setDataStream((ds) => (ds ? [...ds, dataPart] : []));
     },
     onError: (error) => {
+      const model = chatModels.find(
+        ({ id }) => id === currentModelIdRef.current
+      );
+      setWaitingStatus({
+        message:
+          error.message ||
+          "The chat service stopped responding. Please try again.",
+        modelId: currentModelIdRef.current,
+        modelName: model?.name ?? currentModelIdRef.current,
+        phase: "unavailable",
+      });
       if (error.message?.includes("AI Gateway requires a valid credit card")) {
         setShowCreditCardAlert(true);
       } else if (error instanceof ChatbotError) {
@@ -163,6 +181,9 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
         return {
           body: {
             id: request.id,
+            agentMode: isToolApprovalContinuation
+              ? "mcp"
+              : agentModeRef.current,
             ...(isToolApprovalContinuation
               ? { messages: request.messages }
               : { message: lastMessage }),
@@ -176,7 +197,7 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
   });
 
   useEffect(() => {
-    if (status === "submitted" || status === "ready" || status === "error") {
+    if (status === "submitted" || status === "ready") {
       setWaitingStatus(undefined);
     }
   }, [status, setWaitingStatus]);
@@ -257,6 +278,7 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ActiveChatContextValue>(
     () => ({
       addToolApprovalResponse,
+      agentMode,
       chatId,
       currentModelId,
       input,
@@ -266,6 +288,7 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
       regenerate,
       sendMessage,
       setCurrentModelId,
+      setAgentMode,
       setInput,
       setMessages,
       setShowCreditCardAlert,
@@ -291,6 +314,7 @@ export function ActiveChatProvider({ children }: { children: ReactNode }) {
       isLoading,
       votes,
       currentModelId,
+      agentMode,
       showCreditCardAlert,
     ]
   );

@@ -5,8 +5,10 @@ import {
   createUIMessageStreamResponse,
   generateId,
   isStepCount,
+  pruneMessages,
   streamText,
   toUIMessageStream,
+  type ModelMessage,
 } from "ai";
 import { checkBotId } from "botid/server";
 import { after } from "next/server";
@@ -22,7 +24,7 @@ import {
 } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
-import { connectMetisGateway } from "@/lib/ai/mcp";
+import { connectMcpTools } from "@/lib/ai/mcp";
 import { createDocument } from "@/lib/ai/tools/create-document";
 import { editDocument } from "@/lib/ai/tools/edit-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
@@ -52,11 +54,72 @@ import { type PostRequestBody, postRequestBodySchema } from "./schema";
 export const maxDuration = 3600;
 
 const HEALTH_CHECK_DELAY_MS = 9000;
+const MODEL_CONTEXT_WINDOW_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_CONTEXT_WINDOW_TOKENS ?? "131072",
+  10
+);
+const MODEL_OUTPUT_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_MAX_OUTPUT_TOKENS ?? "8192",
+  10
+);
+const CONTEXT_OVERHEAD_TOKENS = 16_384;
+const DEFAULT_CONTEXT_INPUT_TOKENS =
+  MODEL_CONTEXT_WINDOW_TOKENS - MODEL_OUTPUT_TOKENS - CONTEXT_OVERHEAD_TOKENS;
+const MAX_CONTEXT_INPUT_TOKENS = Math.min(
+  Number.parseInt(
+    process.env.OPENHARNESS_AUTO_COMPACT_THRESHOLD_TOKENS ??
+      String(DEFAULT_CONTEXT_INPUT_TOKENS),
+    10
+  ),
+  DEFAULT_CONTEXT_INPUT_TOKENS
+);
+const CONTEXT_COMPACTION_NOTICE =
+  "Earlier conversation history was compacted to fit the model context window. Use the recent conversation and saved agent memories for prior details.";
 
 function isModelStreamActivity(chunk: { type: string }) {
   return !["start", "start-step", "finish-step", "finish", "raw"].includes(
     chunk.type
   );
+}
+
+function estimateTokenCount(messages: ModelMessage[]): number {
+  // This deliberately overestimates typical Qwen tokenization, including code,
+  // so the retained history leaves room for the system prompt and tool schemas.
+  return Math.ceil(JSON.stringify(messages).length / 2);
+}
+
+function compactModelMessages(messages: ModelMessage[]): ModelMessage[] {
+  const prunedMessages = pruneMessages({
+    emptyMessages: "remove",
+    messages,
+    reasoning: "before-last-message",
+    toolCalls: "before-last-8-messages",
+  });
+
+  if (estimateTokenCount(prunedMessages) <= MAX_CONTEXT_INPUT_TOKENS) {
+    return prunedMessages;
+  }
+
+  const notice: ModelMessage = {
+    content: CONTEXT_COMPACTION_NOTICE,
+    role: "system",
+  };
+  let firstRetainedIndex = prunedMessages.length - 1;
+
+  // Retain complete turns from the newest user message backwards. Starting at
+  // a user turn prevents orphaning a tool result from its originating call.
+  for (let index = prunedMessages.length - 1; index >= 0; index -= 1) {
+    if (prunedMessages[index]?.role !== "user") {
+      continue;
+    }
+    const candidateMessages = [notice, ...prunedMessages.slice(index)];
+    if (estimateTokenCount(candidateMessages) > MAX_CONTEXT_INPUT_TOKENS) {
+      break;
+    }
+    firstRetainedIndex = index;
+  }
+
+  return [notice, ...prunedMessages.slice(firstRetainedIndex)];
 }
 
 function getStreamContext() {
@@ -69,6 +132,51 @@ function getStreamContext() {
 
 export { getStreamContext };
 
+function formatChatStreamError(error: unknown): string {
+  if (error instanceof DOMException && error.name === "TimeoutError") {
+    return "The agent stopped responding and was cancelled after a period of inactivity. Please try again.";
+  }
+
+  const message = error instanceof Error ? error.message.trim() : String(error).trim();
+  const normalizedMessage = message.replace(/\s+/g, " ").slice(0, 500);
+  const lowerCaseMessage = normalizedMessage.toLowerCase();
+
+  if (!normalizedMessage || normalizedMessage === "[object Object]") {
+    return "The language model request failed without an error message. Check that the configured model service is running and reachable.";
+  }
+  if (lowerCaseMessage.includes("credit card")) {
+    return "AI Gateway requires a valid credit card on file to service requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card to add a card and unlock your free credits.";
+  }
+  if (
+    lowerCaseMessage.includes("fetch failed") ||
+    lowerCaseMessage.includes("econnrefused") ||
+    lowerCaseMessage.includes("enotfound") ||
+    lowerCaseMessage.includes("network")
+  ) {
+    return "Unable to reach the configured language model. Check that the model service is running and reachable.";
+  }
+  if (lowerCaseMessage.includes("401") || lowerCaseMessage.includes("unauthorized")) {
+    return "The configured language model rejected the request because its credentials are invalid or missing.";
+  }
+  if (lowerCaseMessage.includes("403") || lowerCaseMessage.includes("forbidden")) {
+    return "The configured language model refused this request. Check the model service permissions.";
+  }
+  if (lowerCaseMessage.includes("404") || lowerCaseMessage.includes("not found")) {
+    return "The configured language model or endpoint was not found. Check the selected model and base URL.";
+  }
+  if (lowerCaseMessage.includes("429") || lowerCaseMessage.includes("rate limit")) {
+    return "The language model is rate-limiting requests. Please wait a moment and try again.";
+  }
+  if (lowerCaseMessage.includes("timeout") || lowerCaseMessage.includes("timed out")) {
+    return "The language model request timed out. The service may be overloaded; please try again.";
+  }
+  if (/\b5\d\d\b/.test(normalizedMessage)) {
+    return `The language model service returned an upstream error: ${normalizedMessage}`;
+  }
+
+  return `The language model request failed: ${normalizedMessage}`;
+}
+
 export async function POST(request: Request) {
   let requestBody: PostRequestBody;
 
@@ -80,8 +188,14 @@ export async function POST(request: Request) {
   }
 
   try {
-    const { id, message, messages, selectedChatModel, selectedVisibilityType } =
-      requestBody;
+    const {
+      agentMode,
+      id,
+      message,
+      messages,
+      selectedChatModel,
+      selectedVisibilityType,
+    } = requestBody;
 
     const session = await auth();
 
@@ -195,7 +309,12 @@ export async function POST(request: Request) {
     const isReasoningModel = capabilities?.reasoning === true;
     const supportsTools = capabilities?.tools === true;
 
-    const modelMessages = await convertToModelMessages(uiMessages);
+    const convertedModelMessages = await convertToModelMessages(uiMessages, {
+      // A timed-out MCP call can leave an input-available tool part in the
+      // persisted assistant message. It has no valid tool result to resend.
+      ignoreIncompleteToolCalls: true,
+    });
+    const modelMessages = compactModelMessages(convertedModelMessages);
 
     const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
@@ -263,19 +382,29 @@ export async function POST(request: Request) {
           clearHealthCheckTimer();
         };
 
-        const mcpSession = await connectMetisGateway();
+        const usesMcp =
+          agentMode === "mcp" ||
+          agentMode === "openharness" ||
+          agentMode === "maf";
+        const mcpSession = usesMcp ? await connectMcpTools() : undefined;
 
         const result = streamText({
           // Omitted entirely when tools are usable, so MCP gateway tools stay active.
           ...(isReasoningModel && !supportsTools
             ? { activeTools: [] as const }
             : {}),
-          instructions: systemPrompt({ requestHints, supportsTools }),
+          instructions: systemPrompt({
+            agentMode,
+            requestHints,
+            supportsMcp: Boolean(mcpSession),
+            supportsTools,
+          }),
           messages: modelMessages,
           model: getLanguageModel(chatModel),
+          maxOutputTokens: MODEL_OUTPUT_TOKENS,
           onAbort() {
             stopWaitingStatus();
-            void mcpSession.close();
+            void mcpSession?.close();
           },
           onChunk({ chunk }) {
             if (isModelStreamActivity(chunk)) {
@@ -284,11 +413,11 @@ export async function POST(request: Request) {
           },
           onEnd() {
             stopWaitingStatus();
-            void mcpSession.close();
+            void mcpSession?.close();
           },
           onError() {
             stopWaitingStatus();
-            void mcpSession.close();
+            void mcpSession?.close();
           },
           providerOptions: {
             ...(modelConfig?.gatewayOrder && {
@@ -313,7 +442,7 @@ export async function POST(request: Request) {
             totalMs: maxDuration * 1000,
           },
           tools: {
-            ...mcpSession.tools,
+            ...mcpSession?.tools,
             createDocument: createDocument({
               dataStream,
               modelId: chatModel,
@@ -403,18 +532,7 @@ export async function POST(request: Request) {
       },
       onError: (error) => {
         console.error("Chat stream error:", error);
-        if (
-          error instanceof Error &&
-          error.message?.includes(
-            "AI Gateway requires a valid credit card on file to service requests"
-          )
-        ) {
-          return "AI Gateway requires a valid credit card on file to service requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card to add a card and unlock your free credits.";
-        }
-        if (error instanceof DOMException && error.name === "TimeoutError") {
-          return "The agent stopped responding and was cancelled after a period of inactivity. Please try again.";
-        }
-        return "Oops, an error occurred!";
+        return formatChatStreamError(error);
       },
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
     });

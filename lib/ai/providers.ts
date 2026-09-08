@@ -8,18 +8,19 @@ const providerCache = new Map<
   ReturnType<typeof createOpenAICompatible>
 >();
 
-function providerFor(baseURL: string) {
-  const cached = providerCache.get(baseURL);
+function providerFor(baseURL: string, apiKey: string) {
+  const cacheKey = `${baseURL}:${apiKey}`;
+  const cached = providerCache.get(cacheKey);
   if (cached) {
     return cached;
   }
 
   const provider = createOpenAICompatible({
-    apiKey: process.env.OPENAI_API_KEY ?? "not-needed",
+    apiKey,
     baseURL,
     name: "vllm",
   });
-  providerCache.set(baseURL, provider);
+  providerCache.set(cacheKey, provider);
   return provider;
 }
 
@@ -48,12 +49,18 @@ export function getLanguageModel(modelId: string) {
     throw new Error(`Unknown chat model: ${modelId}`);
   }
 
-  return providerFor(config.baseUrl).chatModel(config.id);
+  return providerFor(
+    config.baseUrl,
+    process.env[config.apiKeyEnv ?? "OPENAI_API_KEY"] ?? "not-needed"
+  ).chatModel(config.id);
 }
 
 export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return providerFor(titleModel.baseUrl).chatModel(titleModel.id);
+  return providerFor(
+    titleModel.baseUrl,
+    process.env[titleModel.apiKeyEnv ?? "OPENAI_API_KEY"] ?? "not-needed"
+  ).chatModel(titleModel.id);
 }

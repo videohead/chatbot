@@ -95,10 +95,14 @@ About the origin of user's request:
 `;
 
 export const systemPrompt = ({
+  agentMode,
   requestHints,
+  supportsMcp,
   supportsTools,
 }: {
+  agentMode: "direct" | "openharness" | "maf" | "mcp";
   requestHints: RequestHints;
+  supportsMcp: boolean;
   supportsTools: boolean;
 }) => {
   const requestPrompt = getRequestPromptFromHints(requestHints);
@@ -107,7 +111,11 @@ export const systemPrompt = ({
     return `${regularPrompt}\n\n${requestPrompt}`;
   }
 
-  return `${regularPrompt}\n\n${openharnessPrompt}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
+  const mafTaskPrompt =
+    agentMode === "maf"
+      ? '\n\nFor this task, dispatch long-running agentic work with run_harness_task using agent_runtime="maf" and context_provider_overrides=["project-skills","agent-memory","compact"]. Keep "compact" enabled for every MAF task so OpenHarness can apply its native context compaction provider.'
+      : "";
+  return `${regularPrompt}${supportsMcp ? `\n\n${openharnessPrompt}${mafTaskPrompt}` : ""}\n\n${requestPrompt}\n\n${artifactsPrompt}`;
 };
 
 export const codePrompt = `

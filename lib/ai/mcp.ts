@@ -1,16 +1,7 @@
 import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
 
-// The metis-router MCP gateway is the default tool discovery route: it already
-// proxies the openharness harness/vector MCP (see metis-router/server/config.json),
-// so it's always attempted first even if METIS_MCP_URL isn't explicitly set.
 const GATEWAY_MCP_URL =
   process.env.METIS_MCP_URL ?? "http://metis-server:9999/mcp";
-
-// Extra MCP servers to connect to directly, in addition to the gateway.
-// Listed after the gateway so gateway tools win when both expose the same name.
-const EXTRA_MCP_SERVER_URLS = [process.env.OPENHARNESS_MCP_URL].filter(
-  (url): url is string => Boolean(url)
-);
 
 type McpTools = Awaited<ReturnType<MCPClient["tools"]>>;
 
@@ -43,17 +34,18 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Connects to the metis-router MCP gateway (the default discovery route) plus any
- * extra directly-configured MCP servers, merging their tools. The gateway's tools
- * take precedence on name conflicts. Servers that fail to connect (or time out)
- * are skipped so chat still works.
+ * All MCP tool access (OpenHarness, MAF, or generic MCP mode) is routed through
+ * metis-router. It's the single gateway that aggregates every downstream MCP
+ * server (openharness, videobrain, morphazoid, etc.) with namespaced tool names,
+ * so tool availability stays consistent across agent modes and chat turns.
  */
-export async function connectMetisGateway(): Promise<McpSession> {
+export async function connectMcpTools(): Promise<McpSession> {
   const clients: MCPClient[] = [];
   let tools = {} as McpTools;
+  const urls = [GATEWAY_MCP_URL];
 
   await Promise.all(
-    [...EXTRA_MCP_SERVER_URLS, GATEWAY_MCP_URL].map(async (url) => {
+    urls.map(async (url) => {
       try {
         const client = await withTimeout(
           createMCPClient({ transport: { type: "http", url } }),

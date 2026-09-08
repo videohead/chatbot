@@ -39,6 +39,19 @@ function WaitingText() {
   );
 }
 
+function UnavailableText() {
+  const { waitingStatus } = useDataStream();
+  const message =
+    waitingStatus?.message ?? "The chat service stopped responding. Please try again.";
+
+  return (
+    <div className="min-w-0 border-l-2 border-destructive/70 pl-3 text-[13px] leading-[1.65] text-muted-foreground">
+      <p className="font-medium text-foreground">Chat unavailable</p>
+      <p className="break-words">{message}</p>
+    </div>
+  );
+}
+
 function ToolApprovalActions({
   addToolApprovalResponse,
   approvalId,
@@ -409,6 +422,24 @@ export const ThinkingMessage = () => (
       </div>
 
       <WaitingText />
+    </div>
+  </div>
+);
+
+export const UnavailableMessage = () => (
+  <div
+    className="group/message w-full"
+    data-role="assistant"
+    data-testid="message-assistant-unavailable"
+  >
+    <div className="flex items-start gap-3">
+      <div className="flex h-[calc(13px*1.65)] shrink-0 items-center">
+        <div className="flex size-7 items-center justify-center rounded-lg bg-destructive/10 text-destructive ring-1 ring-destructive/30">
+          <SparklesIcon size={13} />
+        </div>
+      </div>
+
+      <UnavailableText />
     </div>
   </div>
 );

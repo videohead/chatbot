@@ -1,10 +1,3 @@
-export const VLLM_BASE_URL =
-  process.env.OPENAI_BASE_URL ?? "https://videohead.duckdns.org/vllm/v1";
-export const QWEN_BASE_URL =
-  process.env.QWEN_BASE_URL ?? "http://10.0.0.250:11434/v1";
-
-export const DEFAULT_CHAT_MODEL = process.env.OPENAI_MODEL ?? "gpt-oss-20b";
-
 export type ModelCapabilities = {
   tools: boolean;
   vision: boolean;
@@ -17,28 +10,54 @@ export type ChatModel = {
   provider: string;
   description: string;
   baseUrl: string;
+  apiKeyEnv?: string;
   gatewayOrder?: string[];
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
 };
 
-export const chatModels: ChatModel[] = [
+type AgentModelPool = {
+  api_key_env?: string;
+  base_url: string;
+  model: string;
+  name: string;
+  primary?: boolean;
+  project?: string;
+  provider: string;
+};
+
+const fallbackModels: ChatModel[] = [
   {
-    baseUrl: VLLM_BASE_URL,
-    description: "Local vLLM on the DGX host. 8K context.",
-    id: "gpt-oss-20b",
-    name: "GPT-OSS 20B",
-    provider: "vllm",
-    reasoningEffort: "low",
-  },
-  {
-    baseUrl: QWEN_BASE_URL,
-    description: "Qwen3.8 27B on 10.0.0.250. 128K context, best for long sessions.",
+    apiKeyEnv: "OPENHARNESS_QWEN_API_KEY",
+    baseUrl: "http://10.0.0.105:11434/v1",
+    description: "OpenHarness Qwen3.8 agent pool.",
     id: "unsloth/Qwen3.8-27B-NVFP4",
     name: "Qwen3.8 27B",
     provider: "qwen",
     reasoningEffort: "low",
   },
 ];
+
+function loadAgentModelPools(): ChatModel[] {
+  try {
+    const pools = JSON.parse(process.env.OPENHARNESS_AGENT_MODEL_POOLS ?? "[]") as AgentModelPool[];
+    const models = pools.map((pool) => ({
+      apiKeyEnv: pool.api_key_env,
+      baseUrl: pool.base_url,
+      description: `OpenHarness ${pool.project ?? "default"} agent pool.`,
+      id: pool.model,
+      name: pool.name,
+      provider: pool.provider,
+      reasoningEffort: "low" as const,
+    }));
+    return models.length > 0 ? models : fallbackModels;
+  } catch {
+    return fallbackModels;
+  }
+}
+
+export const chatModels = loadAgentModelPools();
+export const DEFAULT_CHAT_MODEL =
+  process.env.OPENHARNESS_PRIMARY_MODEL ?? chatModels[0]?.id ?? fallbackModels[0].id;
 
 export function getModelConfig(modelId: string): ChatModel | undefined {
   return chatModels.find((model) => model.id === modelId);

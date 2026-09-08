@@ -41,6 +41,8 @@ export function ChatShell() {
     visibilityType,
     isReadonly,
     isLoading,
+    agentMode,
+    setAgentMode,
     votes,
     currentModelId,
     setCurrentModelId,
@@ -152,6 +154,8 @@ export function ChatShell() {
                   messages={messages}
                   onCancelEdit={handleCancelEdit}
                   onModelChange={setCurrentModelId}
+                  agentMode={agentMode}
+                  onAgentModeChange={setAgentMode}
                   selectedModelId={currentModelId}
                   selectedVisibilityType={visibilityType}
                   sendMessage={

@@ -27,6 +27,7 @@ const toolApprovalMessageSchema = z.object({
 });
 
 export const postRequestBodySchema = z.object({
+  agentMode: z.enum(["direct", "openharness", "maf", "mcp"]).default("direct"),
   id: z.uuid(),
   message: userMessageSchema.optional(),
   messages: z.array(toolApprovalMessageSchema).optional(),
