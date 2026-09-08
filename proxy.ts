@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
+import { isDevelopmentEnvironment } from "./lib/constants";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -13,8 +13,18 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // Identity selection must be reachable before any session exists.
-  if (pathname === "/identity" || pathname === "/api/identities") {
+  if (["/login", "/register"].includes(pathname)) {
+    const token = await getToken({
+      req: request,
+      secret: process.env.AUTH_SECRET,
+      secureCookie: !isDevelopmentEnvironment,
+    });
+
+    if (token?.type === "regular") {
+      const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+      return NextResponse.redirect(new URL(`${base}/`, request.url));
+    }
+
     return NextResponse.next();
   }
 
@@ -26,18 +36,12 @@ export async function proxy(request: NextRequest) {
 
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
-  if (!token) {
+  if (!token || token.type !== "regular") {
     const redirectUrl = encodeURIComponent(new URL(request.url).pathname);
 
     return NextResponse.redirect(
-      new URL(`${base}/api/auth/guest?redirectUrl=${redirectUrl}`, request.url)
+      new URL(`${base}/login?redirectUrl=${redirectUrl}`, request.url)
     );
-  }
-
-  const isGuest = guestRegex.test(token?.email ?? "");
-
-  if (token && !isGuest && ["/login", "/register"].includes(pathname)) {
-    return NextResponse.redirect(new URL(`${base}/`, request.url));
   }
 
   return NextResponse.next();

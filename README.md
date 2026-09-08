@@ -69,3 +69,20 @@ pnpm dev
 ```
 
 Your app template should now be running on [localhost:3000](http://localhost:3000).
+
+## Authentication
+Run this code and put your hashed  value in .env
+read -rsp "Password: " PASSWORD
+printf "\n"
+HASH=$(
+  printf '%s' "$PASSWORD" |
+  docker compose -f /opt/openharness-chat/docker-compose.yml exec -T openharness-chat \
+    node --input-type=module -e '
+      import { hash } from "bcrypt-ts";
+      let password = "";
+      process.stdin.on("data", chunk => password += chunk);
+      process.stdin.on("end", async () => console.log(await hash(password, 10)));
+    '
+)
+unset PASSWORD
+printf 'Hash: %s\n' "$HASH"

@@ -18,6 +18,7 @@ import {
   SidebarHistory,
 } from "@/components/chat/sidebar-history";
 import { SidebarUserNav } from "@/components/chat/sidebar-user-nav";
+import { ProjectLinks } from "@/components/chat/project-links";
 import {
   Sidebar,
   SidebarContent,
@@ -144,6 +145,11 @@ export function AppSidebar({ user }: { user: User | undefined }) {
                   </SidebarMenuItem>
                 ) : null}
               </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+          <SidebarGroup className="pt-0 group-data-[collapsible=icon]:hidden">
+            <SidebarGroupContent>
+              <ProjectLinks compact />
             </SidebarGroupContent>
           </SidebarGroup>
           <SidebarHistory user={user} />

@@ -3,15 +3,11 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { DUMMY_PASSWORD } from "@/lib/constants";
-import {
-  createGuestUser,
-  getOrCreateUnixUser,
-  getUser,
-} from "@/lib/db/queries";
-import { isValidUnixIdentity } from "@/lib/unix-users";
+import { getOrCreateConfiguredUser } from "@/lib/db/queries";
+import { getStaticAuthUser } from "@/lib/auth-users";
 import { authConfig } from "./auth.config";
 
-export type UserType = "guest" | "regular";
+export type UserType = "regular";
 
 declare module "next-auth" {
   interface Session extends DefaultSession {
@@ -63,60 +59,26 @@ export const {
   providers: [
     Credentials({
       async authorize(credentials) {
-        const email = String(credentials.email ?? "");
+        const email = String(credentials.email ?? "").trim().toLowerCase();
         const password = String(credentials.password ?? "");
-        const users = await getUser(email);
+        const configuredUser = getStaticAuthUser(email);
 
-        if (users.length === 0) {
+        if (!configuredUser) {
           await compare(password, DUMMY_PASSWORD);
           return null;
         }
 
-        const [user] = users;
-
-        if (!user.password) {
-          await compare(password, DUMMY_PASSWORD);
+        if (!(await compare(password, configuredUser.passwordHash))) {
           return null;
         }
 
-        const passwordsMatch = await compare(password, user.password);
-
-        if (!passwordsMatch) {
-          return null;
-        }
-
+        const [user] = await getOrCreateConfiguredUser(email);
         return { ...user, type: "regular" };
       },
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-    }),
-    Credentials({
-      async authorize() {
-        const [guestUser] = await createGuestUser();
-        return { ...guestUser, type: "guest" };
-      },
-      credentials: {},
-      id: "guest",
-    }),
-    // Identification only, not authentication: any visitor may claim any listed
-    // identity. This exists to scope chat history, not to restrict access.
-    Credentials({
-      async authorize(credentials) {
-        const username = String(credentials.username ?? "");
-
-        if (!(await isValidUnixIdentity(username))) {
-          return null;
-        }
-
-        const [unixUser] = await getOrCreateUnixUser(username);
-        return { ...unixUser, type: "regular" };
-      },
-      credentials: {
-        username: { label: "Identity", type: "text" },
-      },
-      id: "unix",
     }),
   ],
 });

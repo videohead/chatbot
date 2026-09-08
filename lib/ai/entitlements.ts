@@ -11,9 +11,6 @@ const MAX_MESSAGES_PER_HOUR = Number.parseInt(
 );
 
 export const entitlementsByUserType: Record<UserType, Entitlements> = {
-  guest: {
-    maxMessagesPerHour: MAX_MESSAGES_PER_HOUR,
-  },
   regular: {
     maxMessagesPerHour: MAX_MESSAGES_PER_HOUR,
   },

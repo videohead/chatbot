@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useActionState, useEffect, useState } from "react";
@@ -51,15 +50,6 @@ export default function Page() {
       </p>
       <AuthForm action={handleSubmit} defaultEmail={email}>
         <SubmitButton isSuccessful={isSuccessful}>Sign in</SubmitButton>
-        <p className="text-center text-[13px] text-muted-foreground">
-          {"No account? "}
-          <Link
-            className="text-foreground underline-offset-4 hover:underline"
-            href="/register"
-          >
-            Sign up
-          </Link>
-        </p>
       </AuthForm>
     </>
   );

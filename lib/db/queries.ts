@@ -56,6 +56,29 @@ export async function createUser(email: string, password: string) {
   }
 }
 
+export async function getOrCreateConfiguredUser(email: string) {
+  try {
+    const existing = await db
+      .select({ email: user.email, id: user.id })
+      .from(user)
+      .where(eq(user.email, email));
+
+    if (existing.length > 0) {
+      return existing;
+    }
+
+    return await db
+      .insert(user)
+      .values({ email, password: generateHashedPassword(generateUUID()) })
+      .returning({
+        email: user.email,
+        id: user.id,
+      });
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
+  }
+}
+
 export async function createGuestUser() {
   const email = `guest-${Date.now()}`;
   const password = generateHashedPassword(generateUUID());

@@ -62,7 +62,12 @@ const MODEL_OUTPUT_TOKENS = Number.parseInt(
   process.env.OPENHARNESS_MAX_OUTPUT_TOKENS ?? "8192",
   10
 );
-const CONTEXT_OVERHEAD_TOKENS = 16_384;
+// Reserve for the system prompt, tool schemas, and JSON framing. MCP tool
+// definitions can be large and are not counted by estimateTokenCount().
+const CONTEXT_OVERHEAD_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_CONTEXT_OVERHEAD_TOKENS ?? "32768",
+  10
+);
 const DEFAULT_CONTEXT_INPUT_TOKENS =
   MODEL_CONTEXT_WINDOW_TOKENS - MODEL_OUTPUT_TOKENS - CONTEXT_OVERHEAD_TOKENS;
 const MAX_CONTEXT_INPUT_TOKENS = Math.min(
@@ -76,6 +81,81 @@ const MAX_CONTEXT_INPUT_TOKENS = Math.min(
 const CONTEXT_COMPACTION_NOTICE =
   "Earlier conversation history was compacted to fit the model context window. Use the recent conversation and saved agent memories for prior details.";
 
+// Cap the size of persisted tool outputs that get re-injected as context on
+// every turn. Stored `dynamic-tool` / `tool-*` outputs (execute_command,
+// read_repo_file) can be 100-235KB each; a 46-message chat accumulated 3.8MB
+// of them, which the whole-history rehydration then re-sent on every request
+// until the context window overflowed. Only the most recent tool results are
+// useful to the model, so older ones are replaced with a short placeholder.
+// The cap scales with the model's context window (pool config) so behavior is
+// uniform with the backend tuning.
+const TOOL_OUTPUT_KEEP_RECENT = Number.parseInt(
+  process.env.OPENHARNESS_TOOL_OUTPUT_KEEP_RECENT ?? "4",
+  10
+);
+const TOOL_OUTPUT_MAX_CHARS = Math.max(
+  512,
+  Number.parseInt(
+    process.env.OPENHARNESS_TOOL_OUTPUT_MAX_CHARS ??
+      String(Math.floor(MODEL_CONTEXT_WINDOW_TOKENS / 16)),
+    10
+  )
+);
+
+function isToolPart(part: { type?: string }): boolean {
+  const t = part.type ?? "";
+  return t === "dynamic-tool" || t.startsWith("tool-");
+}
+
+function truncateToolOutputText(value: unknown): unknown {
+  if (typeof value !== "string" || value.length <= TOOL_OUTPUT_MAX_CHARS) {
+    return value;
+  }
+  return `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n\n[…tool output truncated to fit context window…]`;
+}
+
+// Truncate the `output.content[].text` payload of tool parts older than the
+// newest TOOL_OUTPUT_KEEP_RECENT tool messages. Returns the (possibly copied)
+// UI messages; recent turns are untouched.
+function truncateStaleToolOutputs(uiMessages: ChatMessage[]): ChatMessage[] {
+  // Find the indices of messages that contain tool parts, newest first.
+  const toolMessageIndexes: number[] = [];
+  uiMessages.forEach((msg, i) => {
+    if ((msg.parts as { type?: string }[] | undefined)?.some(isToolPart)) {
+      toolMessageIndexes.push(i);
+    }
+  });
+  const stale = new Set(toolMessageIndexes.slice(0, Math.max(0, toolMessageIndexes.length - TOOL_OUTPUT_KEEP_RECENT)));
+  if (stale.size === 0) {
+    return uiMessages;
+  }
+
+  return uiMessages.map((msg, i) => {
+    if (!stale.has(i)) {
+      return msg;
+    }
+    const parts = (msg.parts as Record<string, unknown>[]).map((part) => {
+      if (!isToolPart(part as { type?: string })) {
+        return part;
+      }
+      const output = part.output as { content?: { text?: unknown }[] } | undefined;
+      if (!output?.content) {
+        return part;
+      }
+      return {
+        ...part,
+        output: {
+          ...output,
+          content: output.content.map((c) =>
+            c && typeof c === "object" ? { ...c, text: truncateToolOutputText(c.text) } : c
+          ),
+        },
+      };
+    });
+    return { ...msg, parts: parts as ChatMessage["parts"] };
+  });
+}
+
 function isModelStreamActivity(chunk: { type: string }) {
   return !["start", "start-step", "finish-step", "finish", "raw"].includes(
     chunk.type
@@ -88,22 +168,21 @@ function estimateTokenCount(messages: ModelMessage[]): number {
   return Math.ceil(JSON.stringify(messages).length / 2);
 }
 
-function compactModelMessages(messages: ModelMessage[]): ModelMessage[] {
+function compactModelMessages(messages: ModelMessage[]): {
+  messages: ModelMessage[];
+  instructions?: string;
+} {
   const prunedMessages = pruneMessages({
     emptyMessages: "remove",
     messages,
     reasoning: "before-last-message",
     toolCalls: "before-last-8-messages",
-  });
+  }).filter((message) => message.role !== "system");
 
   if (estimateTokenCount(prunedMessages) <= MAX_CONTEXT_INPUT_TOKENS) {
-    return prunedMessages;
+    return { messages: prunedMessages };
   }
 
-  const notice: ModelMessage = {
-    content: CONTEXT_COMPACTION_NOTICE,
-    role: "system",
-  };
   let firstRetainedIndex = prunedMessages.length - 1;
 
   // Retain complete turns from the newest user message backwards. Starting at
@@ -112,14 +191,17 @@ function compactModelMessages(messages: ModelMessage[]): ModelMessage[] {
     if (prunedMessages[index]?.role !== "user") {
       continue;
     }
-    const candidateMessages = [notice, ...prunedMessages.slice(index)];
+    const candidateMessages = prunedMessages.slice(index);
     if (estimateTokenCount(candidateMessages) > MAX_CONTEXT_INPUT_TOKENS) {
       break;
     }
     firstRetainedIndex = index;
   }
 
-  return [notice, ...prunedMessages.slice(firstRetainedIndex)];
+  return {
+    instructions: CONTEXT_COMPACTION_NOTICE,
+    messages: prunedMessages.slice(firstRetainedIndex),
+  };
 }
 
 function getStreamContext() {
@@ -309,12 +391,14 @@ export async function POST(request: Request) {
     const isReasoningModel = capabilities?.reasoning === true;
     const supportsTools = capabilities?.tools === true;
 
-    const convertedModelMessages = await convertToModelMessages(uiMessages, {
+    const truncatedUiMessages = truncateStaleToolOutputs(uiMessages);
+    const convertedModelMessages = await convertToModelMessages(truncatedUiMessages, {
       // A timed-out MCP call can leave an input-available tool part in the
       // persisted assistant message. It has no valid tool result to resend.
       ignoreIncompleteToolCalls: true,
     });
-    const modelMessages = compactModelMessages(convertedModelMessages);
+    const compactedModelMessages = compactModelMessages(convertedModelMessages);
+    const modelMessages = compactedModelMessages.messages;
 
     const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
@@ -405,12 +489,17 @@ export async function POST(request: Request) {
           ...(isReasoningModel && !supportsTools
             ? { activeTools: [] as const }
             : {}),
-          instructions: systemPrompt({
-            agentMode,
-            requestHints,
-            supportsMcp: hasMcpTools,
-            supportsTools,
-          }),
+          instructions: [
+            systemPrompt({
+              agentMode,
+              requestHints,
+              supportsMcp: hasMcpTools,
+              supportsTools,
+            }),
+            compactedModelMessages.instructions,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
           messages: modelMessages,
           model: getLanguageModel(chatModel),
           maxOutputTokens: MODEL_OUTPUT_TOKENS,
