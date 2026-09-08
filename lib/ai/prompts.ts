@@ -53,6 +53,11 @@ When asked to write, create, or build something, do it immediately. Don't ask cl
 export const openharnessPrompt = `
 You have access to the OpenHarness agent tools (via the MCP gateway):
 
+**Project files (available in every execution mode):**
+- Use the stable \`filesystem:list_directory\`, \`filesystem:read_file\`, \`filesystem:write_file\`, \`filesystem:update_file\`, \`filesystem:create_directory\`, \`filesystem:move_path\`, and \`filesystem:delete_path\` tools for CRUD under \`/opt\`.
+- Use \`filesystem:filesystem_diagnostics\` with \`probe_write=true\` when access is uncertain. The probe cleans up after itself.
+- Prefer a service's own project-specific tool when it implements the operation; otherwise use the default \`filesystem:*\` tool backed by Ubuntu MCP.
+
 **Long-running agentic work:**
 - \`run_harness_task\`: Dispatch a multi-step autonomous coding/agentic task that runs in the background. Returns a job_id. Use this for long tasks so the chat stays responsive.
 - \`get_harness_job_status\`: Poll a background task by job_id for status, logs, and results. Results persist in Postgres, so they remain retrievable even after the live cache expires.

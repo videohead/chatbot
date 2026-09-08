@@ -714,7 +714,7 @@ const agentModeOptions: {
   value: AgentExecutionMode;
 }[] = [
   {
-    description: "Direct model chat without MCP tools.",
+    description: "Direct model chat with gateway tools available.",
     label: "Direct",
     value: "direct",
   },

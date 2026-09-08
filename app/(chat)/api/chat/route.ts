@@ -382,11 +382,23 @@ export async function POST(request: Request) {
           clearHealthCheckTimer();
         };
 
-        const usesMcp =
-          agentMode === "mcp" ||
-          agentMode === "openharness" ||
-          agentMode === "maf";
-        const mcpSession = usesMcp ? await connectMcpTools() : undefined;
+        const mcpSession = supportsTools ? await connectMcpTools() : undefined;
+        const hasMcpTools = Boolean(
+          mcpSession && Object.keys(mcpSession.tools).length > 0
+        );
+        const mcpToolNames = Object.keys(mcpSession?.tools ?? {});
+        console.info("Chat MCP diagnostics", {
+          agentMode,
+          hasDefaultFilesystem: [
+            "filesystem:read_file",
+            "filesystem:write_file",
+            "filesystem:update_file",
+            "filesystem:delete_path",
+          ].every((toolName) => mcpToolNames.includes(toolName)),
+          mcpToolCount: mcpToolNames.length,
+          model: chatModel,
+          supportsTools,
+        });
 
         const result = streamText({
           // Omitted entirely when tools are usable, so MCP gateway tools stay active.
@@ -396,7 +408,7 @@ export async function POST(request: Request) {
           instructions: systemPrompt({
             agentMode,
             requestHints,
-            supportsMcp: Boolean(mcpSession),
+            supportsMcp: hasMcpTools,
             supportsTools,
           }),
           messages: modelMessages,

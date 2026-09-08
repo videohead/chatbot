@@ -41,6 +41,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  */
 export async function connectMcpTools(): Promise<McpSession> {
   const clients: MCPClient[] = [];
+  const errors: string[] = [];
   let tools = {} as McpTools;
   const urls = [GATEWAY_MCP_URL];
 
@@ -61,9 +62,17 @@ export async function connectMcpTools(): Promise<McpSession> {
         tools = { ...tools, ...clientTools };
       } catch (error) {
         console.error(`Failed to connect to MCP server ${url}:`, error);
+        errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
       }
     })
   );
+
+  if (Object.keys(tools).length === 0) {
+    await Promise.all(clients.map((client) => client.close()));
+    throw new Error(
+      `MCP gateway returned no tools. ${errors.join(" | ") || `Gateway: ${GATEWAY_MCP_URL}`}`
+    );
+  }
 
   return {
     close: async () => {
