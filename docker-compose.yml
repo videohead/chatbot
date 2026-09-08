@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/harness}
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
     image: openharness-chat:latest
     container_name: openharness-chat
     env_file:
@@ -14,7 +14,7 @@ services:
       - "127.0.0.1:15000:3000"
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH:-/harness}
+      - NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH:-}
       - AUTH_SECRET=${AUTH_SECRET}
       - AUTH_TRUST_HOST=true
       - POSTGRES_URL=postgresql://openharness:openharness_pass@openharness-postgres:5432/openharness_db
