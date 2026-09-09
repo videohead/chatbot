@@ -18,6 +18,7 @@ import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import {
   allowedModelIds,
   chatModels,
+  type ChatModel,
   DEFAULT_CHAT_MODEL,
   getCapabilities,
   getModelAvailability,
@@ -29,14 +30,21 @@ import { createDocument } from "@/lib/ai/tools/create-document";
 import { editDocument } from "@/lib/ai/tools/edit-document";
 import { getWeather } from "@/lib/ai/tools/get-weather";
 import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
+import {
+  formatSessionRagContext,
+  searchSessionContext,
+  storeSessionContext,
+} from "@/lib/ai/session-rag";
 import { updateDocument } from "@/lib/ai/tools/update-document";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
   deleteChatById,
+  getContextDumpsByChatId,
   getChatById,
   getMessageCountByUserId,
   getMessagesByChatId,
+  saveDocument,
   saveChat,
   saveMessages,
   updateChatTitleById,
@@ -46,7 +54,7 @@ import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
 import { checkIpRateLimit } from "@/lib/ratelimit";
 import type { ChatMessage, WaitingStatusData } from "@/lib/types";
-import { convertToUIMessages, generateUUID } from "@/lib/utils";
+import { convertToUIMessages, generateUUID, getTextFromMessage } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
@@ -54,39 +62,38 @@ import { type PostRequestBody, postRequestBodySchema } from "./schema";
 export const maxDuration = 3600;
 
 const HEALTH_CHECK_DELAY_MS = 9000;
-const MODEL_CONTEXT_WINDOW_TOKENS = Number.parseInt(
+const DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS = Number.parseInt(
   process.env.OPENHARNESS_CONTEXT_WINDOW_TOKENS ?? "131072",
   10
 );
-const MODEL_OUTPUT_TOKENS = Number.parseInt(
+const DEFAULT_MODEL_OUTPUT_TOKENS = Number.parseInt(
   process.env.OPENHARNESS_MAX_OUTPUT_TOKENS ?? "8192",
   10
 );
 // Reserve for the system prompt, tool schemas, and JSON framing. MCP tool
 // definitions can be large and are not counted by estimateTokenCount().
 const CONTEXT_OVERHEAD_TOKENS = Number.parseInt(
-  process.env.OPENHARNESS_CONTEXT_OVERHEAD_TOKENS ?? "32768",
+  process.env.OPENHARNESS_CONTEXT_OVERHEAD_TOKENS ?? "65536",
   10
 );
 const CONTEXT_SAFETY_MARGIN_TOKENS = Number.parseInt(
-  process.env.OPENHARNESS_CONTEXT_SAFETY_MARGIN_TOKENS ?? "8192",
+  process.env.OPENHARNESS_CONTEXT_SAFETY_MARGIN_TOKENS ?? "16384",
   10
 );
-const DEFAULT_CONTEXT_INPUT_TOKENS =
-  MODEL_CONTEXT_WINDOW_TOKENS -
-  MODEL_OUTPUT_TOKENS -
-  CONTEXT_OVERHEAD_TOKENS -
-  CONTEXT_SAFETY_MARGIN_TOKENS;
-const MAX_CONTEXT_INPUT_TOKENS = Math.min(
-  Number.parseInt(
-    process.env.OPENHARNESS_AUTO_COMPACT_THRESHOLD_TOKENS ??
-      String(DEFAULT_CONTEXT_INPUT_TOKENS),
-    10
-  ),
-  DEFAULT_CONTEXT_INPUT_TOKENS
+const DEFAULT_MAX_CONTEXT_INPUT_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_MAX_CONTEXT_INPUT_TOKENS ?? "8192",
+  10
+);
+const DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS = Number.parseInt(
+  process.env.OPENHARNESS_AUTO_COMPACT_THRESHOLD_TOKENS ?? "106496",
+  10
 );
 const CONTEXT_COMPACTION_NOTICE =
-  "Earlier conversation history was compacted to fit the model context window. Use the recent conversation and saved agent memories for prior details.";
+  "Earlier conversation history was compacted to fit the model context window. Use the recent conversation and the saved context dump artifact for prior details.";
+const CONTEXT_DUMP_PROMPT_CHARS = Math.max(
+  512,
+  Number.parseInt(process.env.OPENHARNESS_CONTEXT_DUMP_PROMPT_CHARS ?? "2048", 10)
+);
 
 // Cap the size of persisted tool outputs that get re-injected as context on
 // every turn. Stored `dynamic-tool` / `tool-*` outputs (execute_command,
@@ -97,14 +104,14 @@ const CONTEXT_COMPACTION_NOTICE =
 // The cap scales with the model's context window (pool config) so behavior is
 // uniform with the backend tuning.
 const TOOL_OUTPUT_KEEP_RECENT = Number.parseInt(
-  process.env.OPENHARNESS_TOOL_OUTPUT_KEEP_RECENT ?? "4",
+  process.env.OPENHARNESS_TOOL_OUTPUT_KEEP_RECENT ?? "0",
   10
 );
 const TOOL_OUTPUT_MAX_CHARS = Math.max(
   512,
   Number.parseInt(
     process.env.OPENHARNESS_TOOL_OUTPUT_MAX_CHARS ??
-      String(Math.floor(MODEL_CONTEXT_WINDOW_TOKENS / 16)),
+      "1024",
     10
   )
 );
@@ -170,17 +177,17 @@ function isModelStreamActivity(chunk: { type: string }) {
 }
 
 function estimateTokenCount(messages: ModelMessage[]): number {
-  // This deliberately overestimates typical Qwen tokenization, including code,
-  // so the retained history leaves room for the system prompt and tool schemas.
-  return Math.ceil(JSON.stringify(messages).length / 2);
+  // Deliberately overestimate because the provider also counts system prompts,
+  // tool schemas, and tokenizer-specific code fragments outside this helper.
+  return JSON.stringify(messages).length;
 }
 
 function compactTextToTokenBudget(text: string, budgetTokens: number): string {
-  if (Math.ceil(text.length / 2) <= budgetTokens) {
+  if (text.length <= budgetTokens) {
     return text;
   }
 
-  const budgetChars = Math.max(512, budgetTokens * 2);
+  const budgetChars = Math.max(512, budgetTokens);
   const notice = "\n\n[OpenHarness Chat compacted earlier content from this oversized message.]\n\n";
   const headChars = Math.max(0, Math.floor((budgetChars - notice.length) * 0.35));
   const tailChars = Math.max(0, budgetChars - notice.length - headChars);
@@ -221,16 +228,20 @@ function compactMessageContentToTokenBudget(
       const compacted = compactTextToTokenBudget(text, remainingBudget.tokens);
       remainingBudget.tokens = Math.max(
         0,
-        remainingBudget.tokens - Math.ceil(compacted.length / 2)
+        remainingBudget.tokens - compacted.length
       );
       return { ...part, text: compacted };
     }),
   } as ModelMessage;
 }
 
-function compactModelMessages(messages: ModelMessage[]): {
+function compactModelMessages(
+  messages: ModelMessage[],
+  budgetTokens: number
+): {
   messages: ModelMessage[];
   instructions?: string;
+  dumpedContext?: string;
 } {
   const prunedMessages = pruneMessages({
     emptyMessages: "remove",
@@ -239,7 +250,7 @@ function compactModelMessages(messages: ModelMessage[]): {
     toolCalls: "before-last-8-messages",
   }).filter((message) => message.role !== "system");
 
-  if (estimateTokenCount(prunedMessages) <= MAX_CONTEXT_INPUT_TOKENS) {
+  if (estimateTokenCount(prunedMessages) <= budgetTokens) {
     return { messages: prunedMessages };
   }
 
@@ -252,19 +263,79 @@ function compactModelMessages(messages: ModelMessage[]): {
       continue;
     }
     const candidateMessages = prunedMessages.slice(index);
-    if (estimateTokenCount(candidateMessages) > MAX_CONTEXT_INPUT_TOKENS) {
+    if (estimateTokenCount(candidateMessages) > budgetTokens) {
       break;
     }
     firstRetainedIndex = index;
   }
 
+  const retainedMessages = compactOversizedRetainedMessages(
+    prunedMessages.slice(firstRetainedIndex),
+    budgetTokens
+  );
+
   return {
+    dumpedContext: serializeContextDump(prunedMessages, retainedMessages),
     instructions: CONTEXT_COMPACTION_NOTICE,
-    messages: compactOversizedRetainedMessages(
-      prunedMessages.slice(firstRetainedIndex),
-      MAX_CONTEXT_INPUT_TOKENS
-    ),
+    messages: retainedMessages,
   };
+}
+
+function getModelContextBudget(modelConfig: ChatModel | undefined) {
+  const contextWindowTokens =
+    modelConfig?.contextWindowTokens ?? DEFAULT_MODEL_CONTEXT_WINDOW_TOKENS;
+  const maxOutputTokens = modelConfig?.maxOutputTokens ?? DEFAULT_MODEL_OUTPUT_TOKENS;
+  const thresholdTokens =
+    modelConfig?.autoCompactThresholdTokens ?? DEFAULT_AUTO_COMPACT_THRESHOLD_TOKENS;
+  const hardInputLimit = Math.max(
+    512,
+    contextWindowTokens -
+      maxOutputTokens -
+      CONTEXT_OVERHEAD_TOKENS -
+      CONTEXT_SAFETY_MARGIN_TOKENS
+  );
+  const maxInputTokens = Math.max(
+    512,
+    Math.min(
+      modelConfig?.maxContextInputTokens ?? DEFAULT_MAX_CONTEXT_INPUT_TOKENS,
+      thresholdTokens,
+      hardInputLimit
+    )
+  );
+
+  return {
+    contextWindowTokens,
+    maxInputTokens,
+    maxOutputTokens,
+    thresholdTokens,
+  };
+}
+
+function serializeContextDump(
+  originalMessages: ModelMessage[],
+  retainedMessages: ModelMessage[]
+): string {
+  return JSON.stringify(
+    {
+      compactedAt: new Date().toISOString(),
+      estimatedOriginalTokens: estimateTokenCount(originalMessages),
+      estimatedRetainedTokens: estimateTokenCount(retainedMessages),
+      originalMessageCount: originalMessages.length,
+      retainedMessageCount: retainedMessages.length,
+      messages: originalMessages,
+    },
+    null,
+    2
+  );
+}
+
+function formatContextDumpForPrompt(content: string | null | undefined): string {
+  if (!content) {
+    return "";
+  }
+
+  const excerpt = content.slice(-CONTEXT_DUMP_PROMPT_CHARS);
+  return `Session context recovered from the latest OpenHarness context dump:\n${excerpt}`;
 }
 
 function compactOversizedRetainedMessages(
@@ -480,15 +551,92 @@ export async function POST(request: Request) {
     const capabilities = modelCapabilities[chatModel];
     const isReasoningModel = capabilities?.reasoning === true;
     const supportsTools = capabilities?.tools === true;
+    const modelContextBudget = getModelContextBudget(modelConfig);
 
     const truncatedUiMessages = truncateStaleToolOutputs(uiMessages);
+    const latestUserMessage = [...uiMessages].reverse().find((item) => item.role === "user");
+    const sessionRagQuery = latestUserMessage ? getTextFromMessage(latestUserMessage) : "";
     const convertedModelMessages = await convertToModelMessages(truncatedUiMessages, {
       // A timed-out MCP call can leave an input-available tool part in the
       // persisted assistant message. It has no valid tool result to resend.
       ignoreIncompleteToolCalls: true,
     });
-    const compactedModelMessages = compactModelMessages(convertedModelMessages);
+    const compactedModelMessages = compactModelMessages(
+      convertedModelMessages,
+      modelContextBudget.maxInputTokens
+    );
     const modelMessages = compactedModelMessages.messages;
+    let compactedContextInstructions = compactedModelMessages.instructions;
+    let retrievedSessionRagChunks = 0;
+    let sessionRagInstructions = "";
+
+    if (!compactedContextInstructions) {
+      const [latestContextDump] = await getContextDumpsByChatId({
+        chatId: id,
+        userId: session.user.id,
+      });
+      const recoveredContext = formatContextDumpForPrompt(latestContextDump?.content);
+      if (recoveredContext) {
+        compactedContextInstructions = recoveredContext;
+      }
+    }
+
+    if (compactedModelMessages.dumpedContext) {
+      try {
+        const documentId = generateUUID();
+        await saveDocument({
+          content: compactedModelMessages.dumpedContext,
+          id: documentId,
+          kind: "text",
+          title: `OpenHarness context dump ${id} ${new Date().toISOString()}`,
+          userId: session.user.id,
+        });
+        const storedSessionRagChunks = await storeSessionContext({
+          chatId: id,
+          content: compactedModelMessages.dumpedContext,
+          metadata: {
+            documentId,
+            model: chatModel,
+            source: "chat-context-compaction",
+          },
+          sourceMessageId: message?.id,
+          userId: session.user.id,
+        });
+        console.info("Stored session RAG context", {
+          chatId: id,
+          documentId,
+          storedSessionRagChunks,
+        });
+        compactedContextInstructions = `${CONTEXT_COMPACTION_NOTICE} Context dump artifact id: ${documentId}.`;
+      } catch (error) {
+        console.warn("Failed to save compacted context dump", error);
+      }
+    }
+
+    try {
+      const sessionRagRows = await searchSessionContext({
+        chatId: id,
+        query: sessionRagQuery,
+        userId: session.user.id,
+      });
+      retrievedSessionRagChunks = sessionRagRows.length;
+      sessionRagInstructions = formatSessionRagContext(sessionRagRows);
+    } catch (error) {
+      console.warn("Session RAG retrieval failed", error);
+    }
+
+    console.info("Chat context budget", {
+      compacted: Boolean(compactedModelMessages.instructions),
+      convertedMessages: convertedModelMessages.length,
+      dumpedContextChars: compactedModelMessages.dumpedContext?.length ?? 0,
+      estimatedInputTokens: estimateTokenCount(modelMessages),
+      maxContextInputTokens: modelContextBudget.maxInputTokens,
+      maxOutputTokens: modelContextBudget.maxOutputTokens,
+      model: chatModel,
+      modelContextWindowTokens: modelContextBudget.contextWindowTokens,
+      retrievedSessionRagChunks,
+      retainedMessages: modelMessages.length,
+    });
 
     const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
@@ -586,13 +734,14 @@ export async function POST(request: Request) {
               supportsMcp: hasMcpTools,
               supportsTools,
             }),
-            compactedModelMessages.instructions,
+            sessionRagInstructions,
+            compactedContextInstructions,
           ]
             .filter(Boolean)
             .join("\n\n"),
           messages: modelMessages,
           model: getLanguageModel(chatModel),
-          maxOutputTokens: MODEL_OUTPUT_TOKENS,
+          maxOutputTokens: modelContextBudget.maxOutputTokens,
           onAbort() {
             stopWaitingStatus();
             void mcpSession?.close();

@@ -11,13 +11,21 @@ export type ChatModel = {
   description: string;
   baseUrl: string;
   apiKeyEnv?: string;
+  autoCompactThresholdTokens?: number;
+  contextWindowTokens?: number;
   gatewayOrder?: string[];
+  maxContextInputTokens?: number;
+  maxOutputTokens?: number;
   reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high";
 };
 
 type AgentModelPool = {
   api_key_env?: string;
   base_url: string;
+  auto_compact_threshold_tokens?: number;
+  context_window_tokens?: number;
+  max_context_input_tokens?: number;
+  max_output_tokens?: number;
   model: string;
   name: string;
   primary?: boolean;
@@ -29,8 +37,12 @@ const fallbackModels: ChatModel[] = [
   {
     apiKeyEnv: "OPENHARNESS_QWEN_API_KEY",
     baseUrl: "http://10.0.0.105:11434/v1",
+    autoCompactThresholdTokens: 106_496,
+    contextWindowTokens: 131_072,
     description: "OpenHarness Qwen3.8 agent pool.",
     id: "unsloth/Qwen3.8-27B-NVFP4",
+    maxContextInputTokens: 8_192,
+    maxOutputTokens: 4_096,
     name: "Qwen3.8 27B",
     provider: "qwen",
     reasoningEffort: "low",
@@ -42,9 +54,13 @@ function loadAgentModelPools(): ChatModel[] {
     const pools = JSON.parse(process.env.OPENHARNESS_AGENT_MODEL_POOLS ?? "[]") as AgentModelPool[];
     const models = pools.map((pool) => ({
       apiKeyEnv: pool.api_key_env,
+      autoCompactThresholdTokens: pool.auto_compact_threshold_tokens,
       baseUrl: pool.base_url,
+      contextWindowTokens: pool.context_window_tokens,
       description: `OpenHarness ${pool.project ?? "default"} agent pool.`,
       id: pool.model,
+      maxContextInputTokens: pool.max_context_input_tokens,
+      maxOutputTokens: pool.max_output_tokens,
       name: pool.name,
       provider: pool.provider,
       reasoningEffort: "low" as const,

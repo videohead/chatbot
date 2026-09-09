@@ -9,6 +9,7 @@ import {
   gt,
   gte,
   inArray,
+  like,
   lt,
   type SQL,
 } from "drizzle-orm";
@@ -384,6 +385,32 @@ export async function saveDocument({
     throw new ChatbotError("bad_request:database", {
       cause: error,
     });
+  }
+}
+
+export async function getContextDumpsByChatId({
+  chatId,
+  limit = 1,
+  userId,
+}: {
+  chatId: string;
+  limit?: number;
+  userId: string;
+}) {
+  try {
+    return await db
+      .select()
+      .from(document)
+      .where(
+        and(
+          eq(document.userId, userId),
+          like(document.title, `OpenHarness context dump ${chatId} %`)
+        )
+      )
+      .orderBy(desc(document.createdAt))
+      .limit(limit);
+  } catch (error) {
+    throw new ChatbotError("bad_request:database", { cause: error });
   }
 }
 
