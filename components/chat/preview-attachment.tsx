@@ -41,6 +41,7 @@ export const PreviewAttachment = ({
           className="size-full object-cover"
           height={96}
           src={src}
+          unoptimized
           width={96}
         />
       ) : contentType?.startsWith("video") ? (

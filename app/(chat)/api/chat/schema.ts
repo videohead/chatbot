@@ -6,11 +6,18 @@ const textPartSchema = z.object({
   type: z.enum(["text"]),
 });
 
+const ownedMediaUrlSchema = z
+  .string()
+  .regex(
+    /^\/(?:[^/?#]+\/)*api\/media\/files\/[0-9a-f-]{36}\.(?:jpg|png|webp|mp4|webm)$/i,
+    "Invalid local media URL"
+  );
+
 const filePartSchema = z.object({
-  mediaType: z.enum(["image/jpeg", "image/png"]),
+  mediaType: z.enum(["image/jpeg", "image/png", "video/mp4", "video/webm"]),
   name: z.string().min(1).max(100),
   type: z.enum(["file"]),
-  url: z.url(),
+  url: z.union([z.url(), ownedMediaUrlSchema]),
 });
 
 const partSchema = z.union([textPartSchema, filePartSchema]);
