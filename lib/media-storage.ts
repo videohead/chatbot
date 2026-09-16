@@ -164,7 +164,7 @@ export async function resolveMediaInputUrl({
 
   let parsed: URL;
   try {
-    parsed = new URL(url);
+    parsed = new URL(url, "http://chatbot.local");
   } catch {
     return url;
   }

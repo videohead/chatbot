@@ -74,10 +74,7 @@ export async function POST(request: Request) {
             mediaType: file.type,
             userId: session.user.id,
           });
-      const url = new URL(
-        `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}${stored.url}`,
-        request.url
-      ).toString();
+      const url = `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}${stored.url}`;
       logger.info("file.upload.complete", {
         byteLength: fileBuffer.byteLength,
         mediaType: file.type,

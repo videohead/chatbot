@@ -3,6 +3,21 @@ import type { Attachment } from "@/lib/types";
 import { Spinner } from "../ui/spinner";
 import { CrossSmallIcon } from "./icons";
 
+function previewUrl(url: string) {
+  try {
+    const parsed = new URL(url);
+    if (
+      ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname) &&
+      parsed.pathname.includes("/api/media/files/")
+    ) {
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch {
+    // Relative same-origin URLs are already safe for Next Image.
+  }
+  return url;
+}
+
 export const PreviewAttachment = ({
   attachment,
   isUploading = false,
@@ -13,6 +28,7 @@ export const PreviewAttachment = ({
   onRemove?: () => void;
 }) => {
   const { name, url, contentType } = attachment;
+  const src = previewUrl(url);
 
   return (
     <div
@@ -24,7 +40,7 @@ export const PreviewAttachment = ({
           alt={name ?? "attachment"}
           className="size-full object-cover"
           height={96}
-          src={url}
+          src={src}
           width={96}
         />
       ) : contentType?.startsWith("video") ? (
@@ -34,7 +50,7 @@ export const PreviewAttachment = ({
           muted
           playsInline
           preload="metadata"
-          src={url}
+          src={src}
         />
       ) : (
         <div className="flex size-full items-center justify-center text-muted-foreground text-xs">
