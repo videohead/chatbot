@@ -7,10 +7,11 @@ import {
   supportsVideoImageInput,
 } from "../../lib/ai/media-settings";
 
-test("image editing is enabled only for the verified GPT Image deployment", () => {
+test("image editing is enabled only for verified image-edit deployments", () => {
   assert.equal(supportsImageInput("openai/openai/gpt-image-2"), true);
+  assert.equal(supportsImageInput("gcp/google/gemini-3-pro-image"), true);
+  assert.equal(supportsImageInput("gcp/google/gemini-3.1-flash-image"), true);
   assert.equal(supportsImageInput("azure/openai/gpt-image-2"), false);
-  assert.equal(supportsImageInput("gcp/google/gemini-3-pro-image"), false);
 });
 
 test("video reference inputs are gated by the exact deployed model", () => {

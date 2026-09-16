@@ -864,7 +864,7 @@ function PureAttachmentsButton({
               ? "Add a JPEG or PNG reference image"
               : "Attach a JPEG or PNG"
           : generationMode === "image"
-            ? "Select OpenAI GPT Image 2 to use a reference image"
+            ? "The selected image model does not accept reference images through its provider route"
             : generationMode === "video"
               ? "The selected video model accepts text prompts only"
               : "Select a vision-capable chat model to attach an image"

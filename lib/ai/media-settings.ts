@@ -8,7 +8,11 @@ export type ImageSizeOption = {
   resolution: string;
 };
 
-const IMAGE_EDIT_MODEL_IDS = new Set(["openai/openai/gpt-image-2"]);
+const IMAGE_EDIT_MODEL_IDS = new Set([
+  "gcp/google/gemini-3-pro-image",
+  "gcp/google/gemini-3.1-flash-image",
+  "openai/openai/gpt-image-2",
+]);
 
 export type VideoInputCapabilities = {
   image: boolean;
