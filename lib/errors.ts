@@ -1,3 +1,5 @@
+import { logger } from "@/lib/logger";
+
 export type ErrorType =
   | "bad_request"
   | "unauthorized"
@@ -62,13 +64,15 @@ export class ChatbotError extends Error {
 
     const { message, cause, statusCode } = this;
 
-    if (visibility === "log") {
-      console.error({
-        cause,
-        code,
-        message,
-      });
+    logger.warn("chatbot.error.response", {
+      cause,
+      code,
+      message,
+      statusCode,
+      visibility,
+    });
 
+    if (visibility === "log") {
       return Response.json(
         { code: "", message: "Something went wrong. Please try again later." },
         { status: statusCode }

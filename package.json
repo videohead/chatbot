@@ -7,6 +7,7 @@
     "build": "tsx lib/db/migrate && next build",
     "start": "next start",
     "check": "ultracite check",
+    "test:unit": "tsx --test tests/unit/*.test.ts",
     "fix": "ultracite fix",
     "prepare": "husky",
     "db:generate": "drizzle-kit generate",
@@ -19,6 +20,7 @@
     "test": "export PLAYWRIGHT=True && pnpm exec playwright test"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.48",
     "@ai-sdk/otel": "^1.0.15",
     "@ai-sdk/provider": "^4.0.2",
     "@ai-sdk/react": "4.0.16",

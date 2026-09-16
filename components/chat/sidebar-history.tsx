@@ -127,11 +127,23 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
     ? paginatedChatHistories.every((page) => page.chats.length === 0)
     : false;
 
-  const handleDelete = useCallback(() => {
+  const handleDelete = useCallback(async () => {
     const chatToDelete = deleteId;
     const isCurrentChat = pathname === `/chat/${chatToDelete}`;
 
     setShowDeleteDialog(false);
+
+    const response = await fetch(
+      `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/chat?id=${chatToDelete}`,
+      { method: "DELETE" }
+    );
+    if (!response.ok) {
+      const error = (await response.json().catch(() => null)) as {
+        message?: string;
+      } | null;
+      toast.error(error?.message ?? "Chat could not be deleted");
+      return;
+    }
 
     if (isCurrentChat) {
       router.replace("/");
@@ -145,11 +157,6 @@ export function SidebarHistory({ user }: { user: User | undefined }) {
         }));
       }
     });
-
-    fetch(
-      `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/chat?id=${chatToDelete}`,
-      { method: "DELETE" }
-    );
 
     toast.success("Chat deleted");
   }, [deleteId, mutate, pathname, router]);

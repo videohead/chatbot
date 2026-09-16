@@ -1,3 +1,4 @@
+model-catalog.json
 node_modules
 .pnp
 .pnp.js
@@ -17,11 +18,14 @@ yarn-error.log*
 .env.production.local
 .turbo
 .env
+.env.media
 .vercel
 .env*.local
 /test-results/
 /playwright-report/
 /blob-report/
 /playwright/*
+logs/
+generated-media/
 next-env.d.ts
 tsconfig.tsbuildinfo

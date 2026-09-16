@@ -63,4 +63,44 @@ test.describe("Model Selector", () => {
     await expect(page.getByPlaceholder("Search models...")).not.toBeVisible();
     await expect(modelButton).toContainText("DeepSeek V3.2");
   });
+
+  test("shows the saved model before the first message", async ({
+    context,
+    page,
+  }) => {
+    const savedModelId = "nvidia/minimaxai/minimax-m3";
+    await context.addCookies([
+      {
+        domain: "localhost",
+        name: "chat-model",
+        path: "/",
+        value: encodeURIComponent(savedModelId),
+      },
+    ]);
+    await page.route("**/api/models", (route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          capabilities: {
+            [savedModelId]: { reasoning: true, tools: true, vision: true },
+          },
+          models: [
+            {
+              description: "Saved model regression fixture",
+              id: savedModelId,
+              name: "Minimax M3",
+              provider: "minimax",
+            },
+          ],
+        }),
+        contentType: "application/json",
+        status: 200,
+      })
+    );
+
+    await page.goto("/");
+
+    await expect(page.getByTestId("model-selector")).toContainText(
+      "Minimax M3"
+    );
+  });
 });

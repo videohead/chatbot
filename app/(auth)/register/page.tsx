@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { useActionState, useEffect, useState } from "react";
+
 import { AuthForm } from "@/components/chat/auth-form";
 import { SubmitButton } from "@/components/chat/submit-button";
 import { toast } from "@/components/chat/toast";
@@ -13,30 +14,36 @@ export default function Page() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [isSuccessful, setIsSuccessful] = useState(false);
-
   const [state, formAction] = useActionState<RegisterActionState, FormData>(
     register,
     { status: "idle" }
   );
-
   const { update: updateSession } = useSession();
+  const error =
+    state.status === "user_exists"
+      ? "An account with this email already exists."
+      : state.status === "failed"
+        ? "Unable to create your account. Please try again."
+        : state.status === "invalid_data"
+          ? "Enter a valid email address and a password of at least 6 characters."
+          : undefined;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: router and updateSession are stable refs
   useEffect(() => {
-    if (state.status === "user_exists") {
-      toast({ description: "Account already exists!", type: "error" });
-    } else if (state.status === "failed") {
-      toast({ description: "Failed to create account!", type: "error" });
-    } else if (state.status === "invalid_data") {
-      toast({
-        description: "Failed validating your submission!",
-        type: "error",
-      });
-    } else if (state.status === "success") {
-      toast({ description: "Account created!", type: "success" });
+    if (state.status === "success") {
       setIsSuccessful(true);
       updateSession();
-      router.refresh();
+      router.replace("/");
+    } else if (state.status === "pending_authorization") {
+      setIsSuccessful(true);
+      toast({
+        description:
+          "Account registered! You cannot log in until your account is authorized.",
+        type: "success",
+      });
+      router.replace("/login");
+    } else if (error) {
+      toast({ description: error, type: "error" });
     }
   }, [state.status]);
 
@@ -48,8 +55,10 @@ export default function Page() {
   return (
     <>
       <h1 className="text-2xl font-semibold tracking-tight">Create account</h1>
-      <p className="text-sm text-muted-foreground">Get started for free</p>
-      <AuthForm action={handleSubmit} defaultEmail={email}>
+      <p className="text-sm text-muted-foreground">
+        Create an account to begin.
+      </p>
+      <AuthForm action={handleSubmit} defaultEmail={email} error={error}>
         <SubmitButton isSuccessful={isSuccessful}>Sign up</SubmitButton>
         <p className="text-center text-[13px] text-muted-foreground">
           {"Have an account? "}

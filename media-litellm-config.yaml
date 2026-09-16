@@ -1,0 +1,77 @@
+model_list:
+  - model_name: openai/openai/gpt-image-2
+    litellm_params:
+      model: openai/openai/openai/gpt-image-2
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: image_generation
+  - model_name: azure/openai/gpt-image-2
+    litellm_params:
+      model: openai/azure/openai/gpt-image-2
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: image_generation
+  - model_name: gcp/google/gemini-3.1-flash-image
+    litellm_params:
+      model: openai/gcp/google/gemini-3.1-flash-image
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: image_generation
+  - model_name: gcp/google/gemini-3-pro-image
+    litellm_params:
+      model: openai/gcp/google/gemini-3-pro-image
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: image_generation
+  - model_name: gcp/google/veo-3.1-generate-001
+    litellm_params:
+      model: openai/gcp/google/veo-3.1-generate-001
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: video_generation
+  - model_name: gcp/google/veo-3.0-generate-001
+    litellm_params:
+      model: openai/gcp/google/veo-3.0-generate-001
+      api_base: https://inference-api.nvidia.com/v1
+      api_key: os.environ/NVIDIA_INFERENCE_API_KEY
+    model_info:
+      mode: video_generation
+
+general_settings:
+  master_key: os.environ/MEDIA_LITELLM_MASTER_KEY
+  pass_through_endpoints:
+    - path: /nvidia-videos
+      target: https://inference-api.nvidia.com/v1/videos
+      include_subpath: true
+      methods:
+        - GET
+      headers:
+        Authorization: Bearer os.environ/NVIDIA_INFERENCE_API_KEY
+    - path: /nvidia-cosmos-nano-video
+      target: https://inference-api.nvidia.com/v1/cosmos3-nano/videos/sync
+      methods:
+        - POST
+      headers:
+        Authorization: Bearer os.environ/NVIDIA_INFERENCE_API_KEY
+    - path: /nvidia-cosmos-super-video
+      target: https://inference-api.nvidia.com/v1/video/nvidia/cosmos3-super/v1/infer
+      methods:
+        - POST
+      headers:
+        Authorization: Bearer os.environ/NVIDIA_INFERENCE_API_KEY
+    - path: /nvidia-interactions
+      target: https://inference-api.nvidia.com/v1beta/interactions
+      include_subpath: true
+      methods:
+        - GET
+        - POST
+      headers:
+        Authorization: Bearer os.environ/NVIDIA_INFERENCE_API_KEY
+
+litellm_settings:
+  drop_params: true

@@ -18,6 +18,7 @@ const nextConfig: NextConfig = {
         ],
       }
     : {}),
+  allowedDevOrigins: ["videohead.duckdns.org"],
   cacheComponents: true,
   devIndicators: false,
   env: {
@@ -43,9 +44,9 @@ const nextConfig: NextConfig = {
   },
   logging: {
     fetches: {
-      fullUrl: false,
+      fullUrl: true,
     },
-    incomingRequests: false,
+    incomingRequests: true,
   },
   poweredByHeader: false,
   reactCompiler: true,

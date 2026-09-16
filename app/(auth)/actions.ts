@@ -3,7 +3,6 @@
 import { z } from "zod";
 
 import { createUser, getUser } from "@/lib/db/queries";
-
 import { signIn } from "./auth";
 
 const authFormSchema = z.object({
@@ -48,7 +47,8 @@ export type RegisterActionState = {
     | "success"
     | "failed"
     | "user_exists"
-    | "invalid_data";
+    | "invalid_data"
+    | "pending_authorization";
 };
 
 export const register = async (
@@ -60,15 +60,21 @@ export const register = async (
       email: formData.get("email"),
       password: formData.get("password"),
     });
+    const email = validatedData.email.trim().toLowerCase();
+    const [existingUser] = await getUser(email);
 
-    const [user] = await getUser(validatedData.email);
-
-    if (user) {
-      return { status: "user_exists" } as RegisterActionState;
+    if (existingUser) {
+      return { status: "user_exists" };
     }
-    await createUser(validatedData.email, validatedData.password);
+
+    const [createdUser] = await createUser(email, validatedData.password);
+
+    if (!createdUser.isAuthorized) {
+      return { status: "pending_authorization" };
+    }
+
     await signIn("credentials", {
-      email: validatedData.email,
+      email,
       password: validatedData.password,
       redirect: false,
     });

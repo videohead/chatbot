@@ -17,7 +17,6 @@ import postgres from "postgres";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { ChatbotError } from "../errors";
-import { generateUUID } from "../utils";
 import {
   type Chat,
   chat,
@@ -46,25 +45,22 @@ export async function getUser(email: string): Promise<User[]> {
 
 export async function createUser(email: string, password: string) {
   const hashedPassword = generateHashedPassword(password);
+  const normalizedEmail = email.trim().toLowerCase();
+  const isAuthorized = normalizedEmail === "videohead@hotmail.com";
 
   try {
-    return await db.insert(user).values({ email, password: hashedPassword });
-  } catch (error) {
-    throw new ChatbotError("bad_request:database", {
-      cause: error,
-    });
-  }
-}
-
-export async function createGuestUser() {
-  const email = `guest-${Date.now()}`;
-  const password = generateHashedPassword(generateUUID());
-
-  try {
-    return await db.insert(user).values({ email, password }).returning({
-      email: user.email,
-      id: user.id,
-    });
+    return await db
+      .insert(user)
+      .values({
+        email: normalizedEmail,
+        isAuthorized,
+        password: hashedPassword,
+      })
+      .returning({
+        email: user.email,
+        id: user.id,
+        isAuthorized: user.isAuthorized,
+      });
   } catch (error) {
     throw new ChatbotError("bad_request:database", { cause: error });
   }

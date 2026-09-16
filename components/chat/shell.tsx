@@ -46,6 +46,7 @@ export function ChatShell() {
     setCurrentModelId,
     showCreditCardAlert,
     setShowCreditCardAlert,
+    chatErrorMessage,
   } = useActiveChat();
 
   const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(
@@ -57,6 +58,16 @@ export function ChatShell() {
 
   const stopRef = useRef(stop);
   stopRef.current = stop;
+
+  useEffect(
+    () => () => {
+      // Detach this browser from the old conversation during navigation. The
+      // server keeps consuming the stream so long-running media work can
+      // finish and persist in that conversation.
+      stopRef.current();
+    },
+    []
+  );
 
   const prevChatIdRef = useRef(chatId);
   useEffect(() => {
@@ -140,6 +151,15 @@ export function ChatShell() {
               status={status}
               votes={votes}
             />
+
+            {chatErrorMessage ? (
+              <div
+                className="mx-auto mb-2 w-[calc(100%-1rem)] max-w-4xl rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-red-700 text-sm dark:border-red-900 dark:bg-red-950/60 dark:text-red-300 md:w-[calc(100%-2rem)]"
+                role="alert"
+              >
+                {chatErrorMessage}
+              </div>
+            ) : null}
 
             <div className="sticky bottom-0 z-1 mx-auto flex w-full max-w-4xl gap-2 border-t-0 bg-background px-2 pb-3 md:px-4 md:pb-4">
               {!isReadonly && (

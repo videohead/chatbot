@@ -7,12 +7,14 @@ export function AuthForm({
   action,
   children,
   defaultEmail = "",
+  error,
 }: {
   action: NonNullable<
     string | ((formData: FormData) => void | Promise<void>) | undefined
   >;
   children: React.ReactNode;
   defaultEmail?: string;
+  error?: string;
 }) {
   return (
     <Form action={action} className="flex flex-col gap-4">
@@ -45,6 +47,11 @@ export function AuthForm({
           required
           type="password"
         />
+        {error ? (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
 
       {children}

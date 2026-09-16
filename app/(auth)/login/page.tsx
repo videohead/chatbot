@@ -21,6 +21,12 @@ export default function Page() {
   );
 
   const { update: updateSession } = useSession();
+  const error =
+    state.status === "failed"
+      ? "The email or password is incorrect."
+      : state.status === "invalid_data"
+        ? "Enter a valid email address and a password of at least 6 characters."
+        : undefined;
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: router and updateSession are stable refs
   useEffect(() => {
@@ -34,7 +40,7 @@ export default function Page() {
     } else if (state.status === "success") {
       setIsSuccessful(true);
       updateSession();
-      router.refresh();
+      router.replace("/");
     }
   }, [state.status]);
 
@@ -49,10 +55,10 @@ export default function Page() {
       <p className="text-sm text-muted-foreground">
         Sign in to your account to continue
       </p>
-      <AuthForm action={handleSubmit} defaultEmail={email}>
+      <AuthForm action={handleSubmit} defaultEmail={email} error={error}>
         <SubmitButton isSuccessful={isSuccessful}>Sign in</SubmitButton>
         <p className="text-center text-[13px] text-muted-foreground">
-          {"No account? "}
+          {"Need an account? "}
           <Link
             className="text-foreground underline-offset-4 hover:underline"
             href="/register"

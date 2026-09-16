@@ -1,24 +1,39 @@
-import { put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
 import { auth } from "@/app/(auth)/auth";
+import { logger } from "@/lib/logger";
+import { storeUploadedImage, storeUploadedVideo } from "@/lib/media-storage";
+
+const IMAGE_UPLOAD_LIMIT = 5 * 1024 * 1024;
+const VIDEO_UPLOAD_LIMIT = 25 * 1024 * 1024;
+const ALLOWED_UPLOAD_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "video/mp4",
+  "video/webm",
+];
 
 const FileSchema = z.object({
   file: z
     .instanceof(Blob)
-    .refine((file) => file.size <= 5 * 1024 * 1024, {
-      message: "File size should be less than 5MB",
+    .refine((file) => ALLOWED_UPLOAD_TYPES.includes(file.type), {
+      message: "File type should be JPEG, PNG, MP4, or WebM",
     })
-    .refine((file) => ["image/jpeg", "image/png"].includes(file.type), {
-      message: "File type should be JPEG or PNG",
-    }),
+    .refine(
+      (file) =>
+        file.size <=
+        (file.type.startsWith("video/")
+          ? VIDEO_UPLOAD_LIMIT
+          : IMAGE_UPLOAD_LIMIT),
+      { message: "Images must be under 5MB and videos under 25MB" }
+    ),
 });
 
 export async function POST(request: Request) {
   const session = await auth();
 
-  if (!session) {
+  if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -44,20 +59,48 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: errorMessage }, { status: 400 });
     }
 
-    const filename = (formData.get("file") as File).name;
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const fileBuffer = await file.arrayBuffer();
+    const originalFilename = (formData.get("file") as File).name;
+    const fileBuffer = new Uint8Array(await file.arrayBuffer());
 
     try {
-      const data = await put(`${safeName}`, fileBuffer, {
-        access: "public",
+      const stored = file.type.startsWith("video/")
+        ? await storeUploadedVideo({
+            bytes: fileBuffer,
+            mediaType: file.type,
+            userId: session.user.id,
+          })
+        : await storeUploadedImage({
+            bytes: fileBuffer,
+            mediaType: file.type,
+            userId: session.user.id,
+          });
+      const url = new URL(
+        `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}${stored.url}`,
+        request.url
+      ).toString();
+      logger.info("file.upload.complete", {
+        byteLength: fileBuffer.byteLength,
+        mediaType: file.type,
+        originalFilename,
+        storedFilename: stored.filename,
+        userId: session.user.id,
       });
-
-      return NextResponse.json(data);
-    } catch {
+      return NextResponse.json({
+        contentType: file.type,
+        pathname: stored.filename,
+        url,
+      });
+    } catch (error) {
+      logger.error("file.upload.storage_error", {
+        error,
+        mediaType: file.type,
+        originalFilename,
+        userId: session.user.id,
+      });
       return NextResponse.json({ error: "Upload failed" }, { status: 500 });
     }
-  } catch {
+  } catch (error) {
+    logger.error("file.upload.request_error", { error });
     return NextResponse.json(
       { error: "Failed to process request" },
       { status: 500 }

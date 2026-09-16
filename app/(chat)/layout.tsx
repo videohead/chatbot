@@ -7,6 +7,7 @@ import { DataStreamProvider } from "@/components/chat/data-stream-provider";
 import { ChatShell } from "@/components/chat/shell";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { ActiveChatProvider } from "@/hooks/use-active-chat";
+import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
 import { auth } from "../(auth)/auth";
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -28,6 +29,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 async function SidebarShell({ children }: { children: React.ReactNode }) {
   const [session, cookieStore] = await Promise.all([auth(), cookies()]);
   const isCollapsed = cookieStore.get("sidebar_state")?.value !== "true";
+  const storedChatModel = cookieStore.get("chat-model")?.value;
+  let initialChatModel = DEFAULT_CHAT_MODEL;
+  if (storedChatModel) {
+    try {
+      initialChatModel = decodeURIComponent(storedChatModel);
+    } catch {
+      // Ignore malformed client cookies and retain the configured default.
+    }
+  }
 
   return (
     <SidebarProvider defaultOpen={!isCollapsed}>
@@ -42,7 +52,7 @@ async function SidebarShell({ children }: { children: React.ReactNode }) {
           }}
         />
         <Suspense fallback={<div className="flex h-dvh" />}>
-          <ActiveChatProvider>
+          <ActiveChatProvider initialModelId={initialChatModel}>
             <ChatShell />
           </ActiveChatProvider>
         </Suspense>

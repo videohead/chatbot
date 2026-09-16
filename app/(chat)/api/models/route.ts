@@ -1,20 +1,35 @@
-import { getAllGatewayModels, getCapabilities, isDemo } from "@/lib/ai/models";
+import { auth } from "@/app/(auth)/auth";
+import { getCapabilities, getLitellmModels } from "@/lib/ai/litellm";
+import { ChatbotError } from "@/lib/errors";
+import { logger } from "@/lib/logger";
 
 export async function GET() {
-  const headers = {
-    "Cache-Control": "public, max-age=86400, s-maxage=86400",
-  };
+  const startedAt = Date.now();
+  const session = await auth();
 
-  const curatedCapabilities = await getCapabilities();
-
-  if (isDemo) {
-    const models = await getAllGatewayModels();
-    const capabilities = Object.fromEntries(
-      models.map((m) => [m.id, curatedCapabilities[m.id] ?? m.capabilities])
-    );
-
-    return Response.json({ capabilities, models }, { headers });
+  if (session?.user?.type !== "regular") {
+    logger.warn("models.get.rejected", {
+      durationMs: Date.now() - startedAt,
+      reason: "unauthorized",
+      userType: session?.user?.type,
+    });
+    return new ChatbotError("unauthorized:api").toResponse();
   }
 
-  return Response.json(curatedCapabilities, { headers });
+  const headers = {
+    "Cache-Control": "public, max-age=30, s-maxage=30",
+  };
+
+  const [models, capabilities] = await Promise.all([
+    getLitellmModels(),
+    getCapabilities(),
+  ]);
+
+  logger.info("models.get.success", {
+    durationMs: Date.now() - startedAt,
+    modelCount: models.length,
+    userId: session.user.id,
+  });
+
+  return Response.json({ capabilities, models }, { headers });
 }

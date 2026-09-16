@@ -8,6 +8,20 @@
       "when": 1710000000000,
       "tag": "0000_initial",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789165600000,
+      "tag": "0001_user_email_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789166000000,
+      "tag": "0002_add_is_authorized",
+      "breakpoints": true
     }
   ]
 }

@@ -7,7 +7,8 @@ import {
   ArrowUpIcon,
   BrainIcon,
   EyeIcon,
-  LockIcon,
+  ImageIcon,
+  VideoIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -20,6 +21,7 @@ import {
   type SetStateAction,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -38,6 +40,17 @@ import {
   ModelSelectorTrigger,
 } from "@/components/ai-elements/model-selector";
 import {
+  getDefaultVideoQuality,
+  getImageSizeOptions,
+  getVideoQualityOptions,
+  normalizeImageSize,
+  normalizeVideoQuality,
+  supportsImageInput,
+  supportsVideoFileInput,
+  supportsVideoImageInput,
+  type VideoQuality,
+} from "@/lib/ai/media-settings";
+import {
   type ChatModel,
   chatModels,
   DEFAULT_CHAT_MODEL,
@@ -53,6 +66,13 @@ import {
   PromptInputTools,
 } from "../ai-elements/prompt-input";
 import { Button } from "../ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { PaperclipIcon, StopIcon } from "./icons";
 import { PreviewAttachment } from "./preview-attachment";
@@ -63,6 +83,8 @@ import {
 } from "./slash-commands";
 import { SuggestedActions } from "./suggested-actions";
 import type { VisibilityType } from "./visibility-selector";
+
+type GenerationMode = "chat" | "image" | "video";
 
 function setCookie(name: string, value: string) {
   const maxAge = 60 * 60 * 24 * 365;
@@ -146,6 +168,51 @@ function PureMultimodalInput({
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [slashIndex, setSlashIndex] = useState(0);
+  const [generationMode, setGenerationModeState] =
+    useState<GenerationMode>("chat");
+  const [selectedImageModelId, setSelectedImageModelId] = useState("");
+  const [selectedVideoModelId, setSelectedVideoModelId] = useState("");
+  const acceptedAttachmentTypes = useMemo(() => {
+    if (generationMode !== "video") {
+      return "image/jpeg,image/png";
+    }
+    const types: string[] = [];
+    if (supportsVideoImageInput(selectedVideoModelId)) {
+      types.push("image/jpeg", "image/png");
+    }
+    if (supportsVideoFileInput(selectedVideoModelId)) {
+      types.push("video/mp4", "video/webm");
+    }
+    return types.join(",");
+  }, [generationMode, selectedVideoModelId]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(`generation-mode:${chatId}`);
+    setGenerationModeState(
+      stored === "image" || stored === "video" ? stored : "chat"
+    );
+  }, [chatId]);
+
+  const setGenerationMode = useCallback(
+    (mode: GenerationMode) => {
+      setGenerationModeState(mode);
+      window.localStorage.setItem(`generation-mode:${chatId}`, mode);
+      textareaRef.current?.focus();
+    },
+    [chatId]
+  );
+  const handleChatMode = useCallback(
+    () => setGenerationMode("chat"),
+    [setGenerationMode]
+  );
+  const handleImageMode = useCallback(
+    () => setGenerationMode("image"),
+    [setGenerationMode]
+  );
+  const handleVideoMode = useCallback(
+    () => setGenerationMode("video"),
+    [setGenerationMode]
+  );
 
   const handleInput = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -191,11 +258,18 @@ function PureMultimodalInput({
           toast("Delete this chat?", {
             action: {
               label: "Delete",
-              onClick: () => {
-                fetch(
+              onClick: async () => {
+                const response = await fetch(
                   `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/chat?id=${chatId}`,
                   { method: "DELETE" }
                 );
+                if (!response.ok) {
+                  const error = (await response.json().catch(() => null)) as {
+                    message?: string;
+                  } | null;
+                  toast.error(error?.message ?? "Chat could not be deleted");
+                  return;
+                }
                 router.push("/");
                 toast.success("Chat deleted");
               },
@@ -227,6 +301,31 @@ function PureMultimodalInput({
   );
 
   const submitForm = useCallback(() => {
+    if (generationMode === "image") {
+      const invalidAttachment = attachments.some(
+        (attachment) => !attachment.contentType.startsWith("image/")
+      );
+      if (invalidAttachment) {
+        toast.error("Image generation accepts a JPEG or PNG reference image");
+        return;
+      }
+    }
+    if (generationMode === "video") {
+      const invalidAttachment = attachments.some((attachment) => {
+        if (attachment.contentType.startsWith("image/")) {
+          return !supportsVideoImageInput(selectedVideoModelId);
+        }
+        if (attachment.contentType.startsWith("video/")) {
+          return !supportsVideoFileInput(selectedVideoModelId);
+        }
+        return true;
+      });
+      if (invalidAttachment) {
+        toast.error("The selected video model does not accept that input type");
+        return;
+      }
+    }
+
     window.history.pushState(
       {},
       "",
@@ -265,6 +364,8 @@ function PureMultimodalInput({
     setLocalStorageInput,
     width,
     chatId,
+    generationMode,
+    selectedVideoModelId,
   ]);
 
   const uploadFile = useCallback(async (file: File) => {
@@ -482,8 +583,9 @@ function PureMultimodalInput({
         )}
 
       <input
+        accept={acceptedAttachmentTypes}
         className="pointer-events-none fixed -top-4 -left-4 size-0.5 opacity-0"
-        multiple
+        multiple={generationMode === "chat"}
         onChange={handleFileChange}
         ref={fileInputRef}
         tabIndex={-1}
@@ -538,7 +640,13 @@ function PureMultimodalInput({
           onChange={handleInput}
           onKeyDown={handleTextareaKeyDown}
           placeholder={
-            editingMessage ? "Edit your message..." : "Ask anything..."
+            editingMessage
+              ? "Edit your message..."
+              : generationMode === "image"
+                ? "Describe the image to generate..."
+                : generationMode === "video"
+                  ? "Describe the video to generate..."
+                  : "Ask anything..."
           }
           ref={textareaRef}
           value={input}
@@ -547,13 +655,73 @@ function PureMultimodalInput({
           <PromptInputTools>
             <AttachmentsButton
               fileInputRef={fileInputRef}
+              generationMode={generationMode}
+              selectedImageModelId={selectedImageModelId}
               selectedModelId={selectedModelId}
+              selectedVideoModelId={selectedVideoModelId}
               status={status}
             />
-            <ModelSelectorCompact
-              onModelChange={onModelChange}
-              selectedModelId={selectedModelId}
-            />
+            <div className="flex items-center rounded-lg bg-muted/60 p-0.5">
+              <Button
+                aria-pressed={generationMode === "chat"}
+                className="h-6 rounded-md px-2 text-[11px]"
+                onClick={handleChatMode}
+                type="button"
+                variant={generationMode === "chat" ? "secondary" : "ghost"}
+              >
+                Chat
+              </Button>
+              <Button
+                aria-pressed={generationMode === "image"}
+                className="h-6 rounded-md px-2 text-[11px]"
+                onClick={handleImageMode}
+                type="button"
+                variant={generationMode === "image" ? "secondary" : "ghost"}
+              >
+                <ImageIcon className="mr-1 size-3" />
+                Image
+              </Button>
+              <Button
+                aria-pressed={generationMode === "video"}
+                className="h-6 rounded-md px-2 text-[11px]"
+                onClick={handleVideoMode}
+                type="button"
+                variant={generationMode === "video" ? "secondary" : "ghost"}
+              >
+                <VideoIcon className="mr-1 size-3" />
+                Video
+              </Button>
+            </div>
+            {generationMode === "chat" ? (
+              <ModelSelectorCompact
+                onModelChange={onModelChange}
+                selectedModelId={selectedModelId}
+              />
+            ) : generationMode === "image" ? (
+              <>
+                <MediaModelSelector
+                  chatId={chatId}
+                  kind="image_generation"
+                  onSelectionChange={setSelectedImageModelId}
+                />
+                <ImageSizeSelector
+                  chatId={chatId}
+                  modelId={selectedImageModelId}
+                />
+              </>
+            ) : (
+              <>
+                <MediaModelSelector
+                  chatId={chatId}
+                  kind="video_generation"
+                  onSelectionChange={setSelectedVideoModelId}
+                />
+                <VideoQualitySelector
+                  chatId={chatId}
+                  modelId={selectedVideoModelId}
+                />
+              </>
+            )}
           </PromptInputTools>
 
           {status === "submitted" ? (
@@ -637,12 +805,18 @@ const AttachmentPreviewItem = memo(PureAttachmentPreviewItem);
 
 function PureAttachmentsButton({
   fileInputRef,
+  generationMode,
   status,
+  selectedImageModelId,
   selectedModelId,
+  selectedVideoModelId,
 }: {
   fileInputRef: React.MutableRefObject<HTMLInputElement | null>;
+  generationMode: GenerationMode;
   status: UseChatHelpers<ChatMessage>["status"];
+  selectedImageModelId: string;
   selectedModelId: string;
+  selectedVideoModelId: string;
 }) {
   const { data: modelsResponse } = useSWR(
     `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/models`,
@@ -653,6 +827,12 @@ function PureAttachmentsButton({
   const caps: Record<string, ModelCapabilities> | undefined =
     modelsResponse?.capabilities ?? modelsResponse;
   const hasVision = caps?.[selectedModelId]?.vision ?? false;
+  const videoAcceptsImage = supportsVideoImageInput(selectedVideoModelId);
+  const videoAcceptsVideo = supportsVideoFileInput(selectedVideoModelId);
+  const canAttachMedia =
+    (generationMode === "video" && (videoAcceptsImage || videoAcceptsVideo)) ||
+    (generationMode === "image" && supportsImageInput(selectedImageModelId)) ||
+    (generationMode === "chat" && hasVision);
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
@@ -665,13 +845,30 @@ function PureAttachmentsButton({
     <Button
       className={cn(
         "h-7 w-7 rounded-lg border border-border/40 p-1 transition-colors",
-        hasVision
+        canAttachMedia
           ? "text-foreground hover:border-border hover:text-foreground"
           : "text-muted-foreground/30 cursor-not-allowed"
       )}
       data-testid="attachments-button"
-      disabled={status !== "ready" || !hasVision}
+      disabled={status !== "ready" || !canAttachMedia}
       onClick={handleClick}
+      title={
+        canAttachMedia
+          ? generationMode === "video"
+            ? videoAcceptsImage && videoAcceptsVideo
+              ? "Add a JPEG/PNG reference image or an MP4/WebM source video"
+              : videoAcceptsImage
+                ? "Add a JPEG or PNG as the video's reference image"
+                : "Add an MP4 or WebM source video"
+            : generationMode === "image"
+              ? "Add a JPEG or PNG reference image"
+              : "Attach a JPEG or PNG"
+          : generationMode === "image"
+            ? "Select OpenAI GPT Image 2 to use a reference image"
+            : generationMode === "video"
+              ? "The selected video model accepts text prompts only"
+              : "Select a vision-capable chat model to attach an image"
+      }
       variant="ghost"
     >
       <PaperclipIcon size={14} style={{ height: 14, width: 14 }} />
@@ -683,40 +880,29 @@ const AttachmentsButton = memo(PureAttachmentsButton);
 
 function ModelSelectorOption({
   capabilities,
-  curated,
   model,
   onModelChange,
   selectedModelId,
   setOpen,
 }: {
   capabilities: Record<string, ModelCapabilities> | undefined;
-  curated: boolean;
   model: ChatModel;
   onModelChange?: (modelId: string) => void;
   selectedModelId: string;
   setOpen: Dispatch<SetStateAction<boolean>>;
 }) {
   const [logoProvider] = model.id.split("/");
-  const maybeWithTooltip = (icon: ReactNode, label: string) => {
-    if (!curated) {
-      return icon;
-    }
-
-    return (
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="inline-flex">{icon}</span>
-        </TooltipTrigger>
-        <TooltipContent side="top" sideOffset={8}>
-          {label}
-        </TooltipContent>
-      </Tooltip>
-    );
-  };
+  const maybeWithTooltip = (icon: ReactNode, label: string) => (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">{icon}</span>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={8}>
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
   const handleSelect = useCallback(() => {
-    if (!curated) {
-      return;
-    }
     onModelChange?.(model.id);
     setCookie("chat-model", model.id);
     setOpen(false);
@@ -725,18 +911,15 @@ function ModelSelectorOption({
         .querySelector<HTMLTextAreaElement>("[data-testid='multimodal-input']")
         ?.focus();
     }, 50);
-  }, [curated, model.id, onModelChange, setOpen]);
+  }, [model.id, onModelChange, setOpen]);
 
-  const option = (
+  return (
     <ModelSelectorItem
-      aria-disabled={!curated}
       className={cn(
         "flex w-full transition-colors",
         model.id === selectedModelId &&
           "border-b border-dashed border-foreground/50",
-        curated
-          ? "data-[selected=true]:bg-muted data-[selected=true]:text-foreground"
-          : "cursor-not-allowed opacity-40 data-[selected=true]:bg-transparent data-[selected=true]:opacity-60 data-[selected=true]:ring-1 data-[selected=true]:ring-muted-foreground/30 data-[selected=true]:ring-inset"
+        "data-[selected=true]:bg-muted data-[selected=true]:text-foreground"
       )}
       onSelect={handleSelect}
       value={model.id}
@@ -762,24 +945,8 @@ function ModelSelectorOption({
               "Supports reasoning"
             )
           : null}
-        {!curated && <LockIcon className="size-3 text-muted-foreground/50" />}
       </div>
     </ModelSelectorItem>
-  );
-
-  if (curated) {
-    return option;
-  }
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <div className="w-full cursor-not-allowed">{option}</div>
-      </TooltipTrigger>
-      <TooltipContent side="right" sideOffset={8}>
-        This model is not available in the demo.
-      </TooltipContent>
-    </Tooltip>
   );
 }
 
@@ -804,8 +971,34 @@ function PureModelSelectorCompact({
 
   const selectedModel =
     activeModels.find((m: ChatModel) => m.id === selectedModelId) ??
-    activeModels.find((m: ChatModel) => m.id === DEFAULT_CHAT_MODEL) ??
-    activeModels[0];
+    (dynamicModels
+      ? (activeModels.find((m: ChatModel) => m.id === DEFAULT_CHAT_MODEL) ??
+        activeModels[0])
+      : selectedModelId === DEFAULT_CHAT_MODEL
+        ? (activeModels.find((m: ChatModel) => m.id === DEFAULT_CHAT_MODEL) ??
+          activeModels[0])
+        : {
+            description: "Waiting for the live model catalog",
+            id: selectedModelId,
+            name: "Loading selected model…",
+            provider: selectedModelId.split("/")[0] || "model",
+          });
+
+  useEffect(() => {
+    if (
+      !dynamicModels?.length ||
+      dynamicModels.some((model) => model.id === selectedModelId)
+    ) {
+      return;
+    }
+    const fallback =
+      dynamicModels.find((model) => model.id === DEFAULT_CHAT_MODEL) ??
+      dynamicModels[0];
+    if (fallback) {
+      onModelChange?.(fallback.id);
+    }
+  }, [dynamicModels, onModelChange, selectedModelId]);
+
   const [provider] = selectedModel.id.split("/");
 
   return (
@@ -824,37 +1017,20 @@ function PureModelSelectorCompact({
         <ModelSelectorInput placeholder="Search models..." />
         <ModelSelectorList>
           {(() => {
-            const curatedIds = new Set(chatModels.map((m) => m.id));
-            const allModels = dynamicModels
-              ? [
-                  ...chatModels,
-                  ...dynamicModels.filter((m) => !curatedIds.has(m.id)),
-                ]
-              : chatModels;
+            const allModels = activeModels;
 
-            const grouped: Record<
-              string,
-              { model: ChatModel; curated: boolean }[]
-            > = {};
+            const grouped: Record<string, ChatModel[]> = {};
             for (const model of allModels) {
-              const key = curatedIds.has(model.id)
-                ? "_available"
-                : model.provider;
+              const key = model.provider;
               if (!grouped[key]) {
                 grouped[key] = [];
               }
-              grouped[key].push({ curated: curatedIds.has(model.id), model });
+              grouped[key].push(model);
             }
 
-            const sortedKeys = Object.keys(grouped).sort((a, b) => {
-              if (a === "_available") {
-                return -1;
-              }
-              if (b === "_available") {
-                return 1;
-              }
-              return a.localeCompare(b);
-            });
+            const sortedKeys = Object.keys(grouped).sort((a, b) =>
+              a.localeCompare(b)
+            );
 
             const providerNames: Record<string, string> = {
               alibaba: "Alibaba",
@@ -882,18 +1058,10 @@ function PureModelSelectorCompact({
             };
 
             return sortedKeys.map((key) => (
-              <ModelSelectorGroup
-                heading={
-                  key === "_available"
-                    ? "Available"
-                    : (providerNames[key] ?? key)
-                }
-                key={key}
-              >
-                {grouped[key].map(({ model, curated }) => (
+              <ModelSelectorGroup heading={providerNames[key] ?? key} key={key}>
+                {grouped[key].map((model) => (
                   <ModelSelectorOption
                     capabilities={capabilities}
-                    curated={curated}
                     key={model.id}
                     model={model}
                     onModelChange={onModelChange}
@@ -911,6 +1079,218 @@ function PureModelSelectorCompact({
 }
 
 const ModelSelectorCompact = memo(PureModelSelectorCompact);
+
+function VideoQualitySelector({
+  chatId,
+  modelId,
+}: {
+  chatId: string;
+  modelId: string;
+}) {
+  const storageKey = `video-quality:${chatId}`;
+  const options = useMemo(() => getVideoQualityOptions(modelId), [modelId]);
+  const [quality, setQuality] = useState<VideoQuality>(() =>
+    getDefaultVideoQuality(modelId)
+  );
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(storageKey);
+    const next = normalizeVideoQuality(modelId, stored);
+    setQuality(next);
+    window.localStorage.setItem(storageKey, next);
+  }, [modelId, storageKey]);
+
+  const handleValueChange = useCallback(
+    (value: string) => {
+      const next = value as VideoQuality;
+      setQuality(next);
+      window.localStorage.setItem(storageKey, next);
+    },
+    [storageKey]
+  );
+
+  return (
+    <Select onValueChange={handleValueChange} value={quality}>
+      <SelectTrigger
+        className="h-7 rounded-lg border-0 bg-transparent px-2 text-[12px] text-muted-foreground shadow-none"
+        data-testid="video-quality-selector"
+        size="sm"
+        title="Video output resolution"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent align="end">
+        {options.map((option) => (
+          <SelectItem key={option.id} value={option.id}>
+            {option.label} · {option.resolution}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+function ImageSizeSelector({
+  chatId,
+  modelId,
+}: {
+  chatId: string;
+  modelId: string;
+}) {
+  const storageKey = `image-size:${chatId}`;
+  const options = useMemo(() => getImageSizeOptions(modelId), [modelId]);
+  const [size, setSize] = useState(() => normalizeImageSize(modelId));
+
+  useEffect(() => {
+    const next = normalizeImageSize(
+      modelId,
+      window.localStorage.getItem(storageKey)
+    );
+    setSize(next);
+    window.localStorage.setItem(storageKey, next);
+  }, [modelId, storageKey]);
+
+  const handleValueChange = useCallback(
+    (value: string) => {
+      const next = normalizeImageSize(modelId, value);
+      setSize(next);
+      window.localStorage.setItem(storageKey, next);
+    },
+    [modelId, storageKey]
+  );
+
+  return (
+    <Select onValueChange={handleValueChange} value={size}>
+      <SelectTrigger
+        className="h-7 rounded-lg border-0 bg-transparent px-2 text-[12px] text-muted-foreground shadow-none"
+        data-testid="image-size-selector"
+        size="sm"
+        title="Generated image dimensions"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent align="end">
+        {options.map((option) => (
+          <SelectItem key={option.id} value={option.id}>
+            {option.label} · {option.resolution}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+type MediaModel = {
+  description: string;
+  id: string;
+  kind: "audio" | "image_generation" | "video_generation";
+  name: string;
+};
+
+function MediaModelSelector({
+  chatId,
+  kind,
+  onSelectionChange,
+}: {
+  chatId: string;
+  kind: "image_generation" | "video_generation";
+  onSelectionChange?: (modelId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState("");
+  const { data } = useSWR<{ models: MediaModel[] }>(
+    `${process.env.NEXT_PUBLIC_BASE_PATH ?? ""}/api/media/models`,
+    (url: string) => fetch(url).then((response) => response.json()),
+    { dedupingInterval: 30_000, revalidateOnFocus: false }
+  );
+  const mediaModels = useMemo(
+    () => (data?.models ?? []).filter((model) => model.kind === kind),
+    [data?.models, kind]
+  );
+  const isVideo = kind === "video_generation";
+  const label = isVideo ? "Video" : "Image";
+  const storageKey = `${isVideo ? "video" : "image"}-model:${chatId}`;
+
+  useEffect(() => {
+    if (mediaModels.length === 0) {
+      return;
+    }
+    const stored = window.localStorage.getItem(storageKey);
+    const next = mediaModels.some((model) => model.id === stored)
+      ? (stored as string)
+      : mediaModels[0].id;
+    setSelectedId(next);
+    window.localStorage.setItem(storageKey, next);
+    onSelectionChange?.(next);
+  }, [mediaModels, onSelectionChange, storageKey]);
+
+  const selected =
+    mediaModels.find((model) => model.id === selectedId) ?? mediaModels[0];
+  if (!selected) {
+    return null;
+  }
+
+  return (
+    <ModelSelector onOpenChange={setOpen} open={open}>
+      <ModelSelectorTrigger asChild>
+        <Button
+          className="h-7 max-w-[180px] justify-between gap-1.5 rounded-lg px-2 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
+          data-testid={`${isVideo ? "video" : "image"}-model-selector`}
+          title={`${label} generator`}
+          variant="ghost"
+        >
+          {isVideo ? (
+            <VideoIcon className="size-3.5" />
+          ) : (
+            <ImageIcon className="size-3.5" />
+          )}
+          <ModelSelectorName>
+            {label}: {selected.name}
+          </ModelSelectorName>
+        </Button>
+      </ModelSelectorTrigger>
+      <ModelSelectorContent commandDefaultValue={selected.id}>
+        <ModelSelectorInput
+          placeholder={`Search ${label.toLowerCase()} generators...`}
+        />
+        <ModelSelectorList>
+          <ModelSelectorGroup heading={`${label} generators`}>
+            {mediaModels.map((model) => (
+              <ModelSelectorItem
+                className={cn(
+                  "flex w-full transition-colors",
+                  model.id === selected.id &&
+                    "border-b border-dashed border-foreground/50"
+                )}
+                key={model.id}
+                // biome-ignore lint/performance/noJsxPropsBind: each row selects its own model
+                onSelect={() => {
+                  setSelectedId(model.id);
+                  window.localStorage.setItem(storageKey, model.id);
+                  onSelectionChange?.(model.id);
+                  setOpen(false);
+                }}
+                value={model.id}
+              >
+                {isVideo ? (
+                  <VideoIcon className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <ImageIcon className="size-3.5 text-muted-foreground" />
+                )}
+                <div className="min-w-0">
+                  <ModelSelectorName>{model.name}</ModelSelectorName>
+                  <div className="truncate text-[10px] text-muted-foreground">
+                    {model.description}
+                  </div>
+                </div>
+              </ModelSelectorItem>
+            ))}
+          </ModelSelectorGroup>
+        </ModelSelectorList>
+      </ModelSelectorContent>
+    </ModelSelector>
+  );
+}
 
 function PureStopButton({
   stop,

@@ -27,6 +27,15 @@ export const PreviewAttachment = ({
           src={url}
           width={96}
         />
+      ) : contentType?.startsWith("video") ? (
+        <video
+          aria-label={name ?? "video attachment"}
+          className="size-full object-cover"
+          muted
+          playsInline
+          preload="metadata"
+          src={url}
+        />
       ) : (
         <div className="flex size-full items-center justify-center text-muted-foreground text-xs">
           File

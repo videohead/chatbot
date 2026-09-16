@@ -3,10 +3,10 @@ import NextAuth, { type DefaultSession } from "next-auth";
 import type { DefaultJWT } from "next-auth/jwt";
 import Credentials from "next-auth/providers/credentials";
 import { DUMMY_PASSWORD } from "@/lib/constants";
-import { createGuestUser, getUser } from "@/lib/db/queries";
+import { getUser } from "@/lib/db/queries";
 import { authConfig } from "./auth.config";
 
-export type UserType = "guest" | "regular";
+export type UserType = "regular";
 
 declare module "next-auth" {
   interface Session extends DefaultSession {
@@ -58,25 +58,26 @@ export const {
   providers: [
     Credentials({
       async authorize(credentials) {
-        const email = String(credentials.email ?? "");
+        const email = String(credentials.email ?? "")
+          .trim()
+          .toLowerCase();
         const password = String(credentials.password ?? "");
+
         const users = await getUser(email);
 
         if (users.length === 0) {
+          // Equalize timing so unknown emails don't leak account existence.
           await compare(password, DUMMY_PASSWORD);
           return null;
         }
 
         const [user] = users;
 
-        if (!user.password) {
-          await compare(password, DUMMY_PASSWORD);
+        if (!user.password || !(await compare(password, user.password))) {
           return null;
         }
 
-        const passwordsMatch = await compare(password, user.password);
-
-        if (!passwordsMatch) {
+        if (!user.isAuthorized) {
           return null;
         }
 
@@ -86,14 +87,6 @@ export const {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
       },
-    }),
-    Credentials({
-      async authorize() {
-        const [guestUser] = await createGuestUser();
-        return { ...guestUser, type: "guest" };
-      },
-      credentials: {},
-      id: "guest",
     }),
   ],
 });

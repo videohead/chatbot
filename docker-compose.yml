@@ -1,0 +1,129 @@
+services:
+  chatbot:
+    build:
+      context: .
+      target: development
+    container_name: chatbot-media-candidate
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - path: .env.local
+        required: false
+        format: raw
+      - path: .env.media
+        required: true
+        format: raw
+    environment:
+      CHATBOT_DEPLOYMENT_LABEL: primary
+      CHATBOT_LOG_BODIES: "true"
+      CHATBOT_LOG_DIR: /app/logs
+      CHATBOT_LOG_LEVEL: debug
+      CHATBOT_WORKSPACE_ACCOUNT: blechdom@gmail.com
+      CHATBOT_WORKSPACE_ENABLED: "true"
+      CHATBOT_WORKSPACE_SECRET_FILE: /run/secrets/blechdom-workspace-token
+      CHATBOT_WORKSPACE_URL: http://chatbot-workspace-blechdom:8080/mcp
+      AGENT_FRAMEWORK_URL: http://agent-framework:8000
+      HOSTNAME: 0.0.0.0
+      LOG_LEVEL: debug
+      NODE_OPTIONS: --enable-source-maps --trace-warnings
+      NEXT_TELEMETRY_DISABLED: "1"
+      MEDIA_LITELLM_BASE_URL: http://media-litellm-candidate:4000/v1
+    entrypoint:
+      - /app/scripts/docker-entrypoint.sh
+    command:
+      - pnpm
+      - dev
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - ./generated-media:/app/generated-media
+      - /home/blechdom/.config/chatbot-workspace/token:/run/secrets/blechdom-workspace-token:ro
+      - chatbot_media_candidate_node_modules:/app/node_modules
+    depends_on:
+      media-litellm:
+        condition: service_healthy
+    logging:
+      driver: local
+      options:
+        max-file: "10"
+        max-size: 50m
+    networks:
+      - metis-network
+    restart: unless-stopped
+
+  media-litellm:
+    image: docker.litellm.ai/berriai/litellm:main-stable
+    container_name: media-litellm-candidate
+    env_file:
+      - path: .env.media
+        required: true
+        format: raw
+    environment:
+      PROVIDER_KEYS_DIR: /opt/provider-keys
+    entrypoint:
+      - /app/candidate-media-entrypoint.sh
+    command:
+      - --config
+      - /app/media-litellm-config.yaml
+    volumes:
+      - ./media-litellm-config.yaml:/app/media-litellm-config.yaml:ro
+      - ./scripts/candidate-media-entrypoint.sh:/app/candidate-media-entrypoint.sh:ro
+      - /opt/provider-keys:/opt/provider-keys:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: local
+      options:
+        max-file: "5"
+        max-size: 25m
+    networks:
+      - metis-network
+    restart: unless-stopped
+
+  chatbot-test:
+    build:
+      context: .
+      target: test
+    container_name: chatbot-media-candidate-test
+    profiles:
+      - test
+    env_file:
+      - path: .env.local
+        required: false
+        format: raw
+    environment:
+      CHATBOT_LOG_BODIES: "true"
+      CHATBOT_LOG_DIR: /app/logs
+      CHATBOT_LOG_LEVEL: debug
+      AGENT_FRAMEWORK_URL: http://agent-framework:8000
+      CI: "true"
+      LOG_LEVEL: debug
+      NODE_OPTIONS: --enable-source-maps --trace-warnings
+      NEXT_TELEMETRY_DISABLED: "1"
+    entrypoint:
+      - /app/scripts/docker-entrypoint.sh
+    command:
+      - pnpm
+      - test
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: local
+      options:
+        max-file: "5"
+        max-size: 25m
+    networks:
+      - metis-network
+
+volumes:
+  chatbot_media_candidate_node_modules:
+
+networks:
+  metis-network:
+    external: true

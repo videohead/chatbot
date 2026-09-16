@@ -11,7 +11,7 @@
   <a href="https://chatbot.ai-sdk.dev/docs"><strong>Read Docs</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#model-providers"><strong>Model Providers</strong></a> ·
-  <a href="#deploy-your-own"><strong>Deploy Your Own</strong></a> ·
+  <a href="#primary-dgx-spark-deployment"><strong>DGX Spark deployment</strong></a> ·
   <a href="#running-locally"><strong>Running locally</strong></a>
 </p>
 <br/>
@@ -46,11 +46,13 @@ This template uses the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) t
 
 With the [AI SDK](https://ai-sdk.dev/docs/introduction), you can also switch to direct LLM providers like [OpenAI](https://openai.com), [Anthropic](https://anthropic.com), [Cohere](https://cohere.com/), and [many more](https://ai-sdk.dev/providers/ai-sdk-providers) with just a few lines of code.
 
-## Deploy Your Own
+## Primary DGX Spark deployment
 
-You can deploy your own version of Chatbot to Vercel with one click:
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/templates/next.js/chatbot)
+This checkout supplies the public chatbot through Traefik and binds Next.js
+only to `127.0.0.1:3000`. See [DEPLOYMENT.md](DEPLOYMENT.md) for guarded start,
+verification, restart, stop, and rollback commands. The Docker container names
+retain their historical candidate suffix because the tested container was
+promoted in place.
 
 ## Running locally
 
@@ -69,3 +71,32 @@ pnpm dev
 ```
 
 Your app template should now be running on [localhost:3000](http://localhost:3000).
+
+### Docker logging
+
+The Docker Compose service writes live output to Docker logs and also tees stdout/stderr to persistent files under `logs/`, which is bind-mounted into the container at `/app/logs`.
+
+Useful commands:
+
+```bash
+docker compose logs -f chatbot
+tail -f logs/chatbot-current.log
+grep 'litellm\|chat.post\|chat.stream\|runtime' logs/chatbot-current.log
+```
+
+Runtime logging is configured with `CHATBOT_LOG_LEVEL=debug` and `CHATBOT_LOG_BODIES=true` in `docker-compose.yml`. Secret-like fields such as cookies, tokens, passwords, and API keys are redacted before structured logs are emitted.
+
+### Local agent stack
+
+The Docker deployment uses two complementary execution paths on the shared `metis-network`:
+
+- Simple model requests and individual MCP operations use `chatbot -> LiteLLM -> Metis`.
+- Complex model-broker, MCP, stack-diagnostics, or multiagent work can use `chatbot -> agent-framework-service -> LiteLLM/Metis` through the `delegateToAgentFramework` tool.
+
+The chatbot chat UUID is forwarded as the Agent Framework session ID, preserving harness context across turns. Useful checks are:
+
+```bash
+docker compose exec -T chatbot node -e 'fetch("http://agent-framework:8000/ready").then(async response => console.log(response.status, await response.text()))'
+curl -fsS http://127.0.0.1:8000/diagnostics | jq
+grep 'agent_framework.delegate' logs/chatbot-current.log
+```

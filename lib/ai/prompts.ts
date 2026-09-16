@@ -46,7 +46,11 @@ CRITICAL RULES:
 
 export const regularPrompt = `You are a helpful assistant. Keep responses concise and direct.
 
-When asked to write, create, or build something, do it immediately. Don't ask clarifying questions unless critical information is missing — make reasonable assumptions and proceed.`;
+When asked to write, create, or build something, do it immediately. Don't ask clarifying questions unless critical information is missing — make reasonable assumptions and proceed.
+
+Use generateImage for requests to create an image. Video generation is handled by the composer's explicit Video mode. If the user asks for a video while using Chat mode, briefly direct them to select Video mode; never substitute an image.
+
+The delegateToAgentFramework tool is a fully implemented connection to the Microsoft Agent Framework multiagent harness. When it returns a successful result, treat that result as authoritative, do not call another tool for the same request, and answer the user from that result.`;
 
 export type RequestHints = {
   latitude: Geo["latitude"];
