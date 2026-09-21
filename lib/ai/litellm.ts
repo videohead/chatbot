@@ -10,7 +10,11 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "@/lib/logger";
-import type { ChatModel, ModelCapabilities } from "./models";
+import {
+  type ChatModel,
+  getModelProvider,
+  type ModelCapabilities,
+} from "./models";
 
 const LITELLM_BASE_URL =
   process.env.LITELLM_BASE_URL ?? "http://litellm:4000/v1";
@@ -157,7 +161,7 @@ function buildState(ids: string[]): LitellmState {
       description: entry?.description ?? "",
       id,
       name: entry?.name ?? prettifyName(id),
-      provider: id.split("/")[0],
+      provider: getModelProvider(id),
     };
   });
 

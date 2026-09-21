@@ -1042,6 +1042,7 @@ function PureModelSelectorCompact({
               google: "Google",
               inception: "Inception",
               kwaipilot: "Kwaipilot",
+              local: "Local",
               meituan: "Meituan",
               meta: "Meta",
               minimax: "MiniMax",

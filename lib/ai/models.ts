@@ -8,12 +8,22 @@
 export const DEFAULT_CHAT_MODEL =
   process.env.NEXT_PUBLIC_DEFAULT_CHAT_MODEL ?? "gpt-oss-20b";
 
+const MODEL_PROVIDER_OVERRIDES: Record<string, string> = {
+  "gpt-oss-20b": "local",
+};
+
+export function getModelProvider(modelId: string): string {
+  return (
+    (MODEL_PROVIDER_OVERRIDES[modelId] ?? modelId.split("/")[0]) || "model"
+  );
+}
+
 export const titleModel = {
   description: "Fast model for title generation",
   gatewayOrder: [] as string[],
   id: DEFAULT_CHAT_MODEL,
   name: "GPT OSS 20B",
-  provider: "openai",
+  provider: getModelProvider(DEFAULT_CHAT_MODEL),
 };
 
 export type ModelCapabilities = {
@@ -39,7 +49,7 @@ export const chatModels: ChatModel[] = [
     description: "Local reasoning model served by vLLM",
     id: DEFAULT_CHAT_MODEL,
     name: "GPT OSS 20B",
-    provider: "openai",
+    provider: getModelProvider(DEFAULT_CHAT_MODEL),
   },
 ];
 
