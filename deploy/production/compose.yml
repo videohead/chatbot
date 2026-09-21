@@ -1,0 +1,94 @@
+name: ${CHATBOT_COMPOSE_PROJECT:?set CHATBOT_COMPOSE_PROJECT}
+
+services:
+  chatbot:
+    image: ${CHATBOT_IMAGE:?set CHATBOT_IMAGE}
+    build:
+      context: ${CHATBOT_BUILD_CONTEXT:?set CHATBOT_BUILD_CONTEXT}
+      dockerfile: deploy/production/Dockerfile
+      target: runtime
+    container_name: ${CHATBOT_CONTAINER_NAME:?set CHATBOT_CONTAINER_NAME}
+    ports:
+      - 127.0.0.1:${CHATBOT_HOST_PORT:?set CHATBOT_HOST_PORT}:3000
+    environment:
+      AGENT_FRAMEWORK_URL: ${AGENT_FRAMEWORK_URL:-http://agent-framework:8000}
+      AUTH_SECRET_FILE: /run/secrets/chatbot-auth-secret
+      AUTH_TRUST_HOST: "true"
+      AUTH_URL: ${CHATBOT_AUTH_URL:?set CHATBOT_AUTH_URL}
+      CHATBOT_DEPLOYMENT_LABEL: ${CHATBOT_DEPLOYMENT_LABEL:-production}
+      CHATBOT_LOG_BODIES: "false"
+      CHATBOT_LOG_DIR: /app/logs
+      CHATBOT_LOG_LEVEL: info
+      CHATBOT_POSTGRES_DATABASE: ${CHATBOT_POSTGRES_DATABASE:-chatbot}
+      CHATBOT_POSTGRES_HOST: ${CHATBOT_POSTGRES_HOST:-litellm_db}
+      CHATBOT_POSTGRES_PASSWORD_FILE: /run/secrets/chatbot-postgres-password
+      CHATBOT_POSTGRES_PORT: ${CHATBOT_POSTGRES_PORT:-5432}
+      CHATBOT_POSTGRES_USER: ${CHATBOT_POSTGRES_USER:-chatbot_app}
+      CHATBOT_WORKSPACE_ACCOUNT: ${CHATBOT_WORKSPACE_ACCOUNT:?set CHATBOT_WORKSPACE_ACCOUNT}
+      CHATBOT_WORKSPACE_ENABLED: ${CHATBOT_WORKSPACE_ENABLED:-true}
+      CHATBOT_WORKSPACE_SECRET_FILE: /run/secrets/workspace-token
+      CHATBOT_WORKSPACE_URL: ${CHATBOT_WORKSPACE_URL:?set CHATBOT_WORKSPACE_URL}
+      LITELLM_API_KEY_FILE: /run/secrets/litellm-client-key
+      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000/v1}
+      LOG_LEVEL: info
+      MEDIA_LITELLM_BASE_URL: ${MEDIA_LITELLM_BASE_URL:?set MEDIA_LITELLM_BASE_URL}
+      MEDIA_LITELLM_MASTER_KEY_FILE: /run/secrets/media-litellm-master-key
+      NEXT_TELEMETRY_DISABLED: "1"
+      NODE_ENV: production
+    secrets:
+      - chatbot-auth-secret
+      - chatbot-postgres-password
+      - litellm-client-key
+      - media-litellm-master-key
+      - workspace-token
+    volumes:
+      - type: bind
+        source: ${CHATBOT_STATE_DIR:?set CHATBOT_STATE_DIR}/logs
+        target: /app/logs
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CHATBOT_GENERATED_MEDIA_DIR:?set CHATBOT_GENERATED_MEDIA_DIR}
+        target: /app/generated-media
+        bind:
+          create_host_path: false
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/api/auth/session').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    logging:
+      driver: local
+      options:
+        max-file: "5"
+        max-size: 25m
+    networks:
+      - metis-network
+    restart: ${CHATBOT_RESTART_POLICY:-no}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+      - /app/.next/cache:size=256m,uid=1000,gid=1000,mode=0700
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  chatbot-auth-secret:
+    file: ${CHATBOT_AUTH_SECRET_FILE:?set CHATBOT_AUTH_SECRET_FILE}
+  chatbot-postgres-password:
+    file: ${CHATBOT_POSTGRES_PASSWORD_FILE:?set CHATBOT_POSTGRES_PASSWORD_FILE}
+  litellm-client-key:
+    file: ${CHATBOT_LITELLM_KEY_FILE:?set CHATBOT_LITELLM_KEY_FILE}
+  media-litellm-master-key:
+    file: ${CHATBOT_MEDIA_LITELLM_KEY_FILE:?set CHATBOT_MEDIA_LITELLM_KEY_FILE}
+  workspace-token:
+    file: ${CHATBOT_WORKSPACE_TOKEN_FILE:?set CHATBOT_WORKSPACE_TOKEN_FILE}
+
+networks:
+  metis-network:
+    external: true

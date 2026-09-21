@@ -1,4 +1,5 @@
 model-catalog.json
+model-catalog.*.json
 node_modules
 .pnp
 .pnp.js
@@ -27,5 +28,7 @@ yarn-error.log*
 /playwright/*
 logs/
 generated-media/
+deploy/production/state/
+deploy/production/releases/
 next-env.d.ts
 tsconfig.tsbuildinfo

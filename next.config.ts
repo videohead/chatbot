@@ -2,6 +2,7 @@ import { withBotId } from "botid/next/config";
 import type { NextConfig } from "next";
 
 const basePath = process.env.IS_DEMO === "1" ? "/demo" : "";
+const isProduction = process.env.NODE_ENV === "production";
 
 const nextConfig: NextConfig = {
   ...(basePath
@@ -44,10 +45,11 @@ const nextConfig: NextConfig = {
   },
   logging: {
     fetches: {
-      fullUrl: true,
+      fullUrl: !isProduction,
     },
-    incomingRequests: true,
+    incomingRequests: !isProduction,
   },
+  ...(isProduction ? { output: "standalone" as const } : {}),
   poweredByHeader: false,
   reactCompiler: true,
 };

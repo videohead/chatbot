@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { getToken } from "next-auth/jwt";
-import { isDevelopmentEnvironment } from "./lib/constants";
+import { shouldUseSecureSessionCookie } from "./lib/auth-cookie";
 import { logger } from "./lib/logger";
 
 function safeHeaders(headers: Headers) {
@@ -38,12 +38,18 @@ export async function proxy(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // The public app terminates TLS at Traefik while loopback validation uses
+  // plain HTTP. Derive the Auth.js cookie name from the request that actually
+  // reached this process so both paths can read their own session cookie.
+  const secureCookie = shouldUseSecureSessionCookie({
+    forwardedProto: request.headers.get("x-forwarded-proto"),
+    requestProtocol: request.nextUrl.protocol,
+  });
+
   const token = await getToken({
     req: request,
     secret: process.env.AUTH_SECRET,
-    secureCookie:
-      !isDevelopmentEnvironment ||
-      request.headers.get("x-forwarded-proto") === "https",
+    secureCookie,
   });
 
   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";

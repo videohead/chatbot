@@ -1,6 +1,10 @@
 .git
 .next
 node_modules
+logs
+generated-media
+deploy/production/state
+deploy/production/releases
 playwright-report
 test-results
 .env
