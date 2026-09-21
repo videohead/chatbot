@@ -1,63 +1,48 @@
-# Primary chatbot deployment
+# Spark chatbot deployment
 
-This repository now supplies the public chatbot at
-`https://videohead.duckdns.org`. Docker publishes the application only on
-`127.0.0.1:3000`; Traefik is the public TLS entry point and forwards its
-`chatbot` service to that loopback address.
+The canonical source checkout is `/opt/chatbot`. The public site is served at
+`https://videohead.duckdns.org`; Traefik terminates TLS and forwards the chatbot
+router to `http://127.0.0.1:3000`.
 
-The Docker Compose project and container retain their historical candidate
-names so the tested container did not need to be replaced during promotion:
+The live application is an immutable production image built from an exact clean
+Git commit with `deploy/production/Dockerfile`. It runs as the `chatbot`
+container in production mode. Source code and `node_modules` are not mounted
+into the live container.
 
-- Compose project: `chatbot-media-candidate`
-- Primary application container: `chatbot-media-candidate`
-- Private media gateway: `media-litellm-candidate`
-- Retained rollback application container: `chatbot` (stopped)
+## Runtime boundaries
 
-Start or rebuild the primary deployment:
+- Application source and generated media: `/opt/chatbot`
+- Workspace adapter source: `/opt/chatbot/services/workspace`
+- Private release state and rollback records:
+  `/home/blechdom/.config/chatbot-cleanup`
+- Workspace policy, state, and forge credentials:
+  `/home/blechdom/.config/chatbot-workspace`
+- Root-owned chatbot secrets: `/etc/chatbot/secrets`
 
-```bash
-sudo bash /opt/chatbot-media-candidate/scripts/start-primary.sh
-```
+Secret files and the generated `model-catalog.json` are not committed. The
+catalog is assembled from metadata-only provider and local-model inputs,
+validated for allowed fields and credential-shaped values, and hashed into the
+private release manifest before it is copied into an image.
 
-Verify the running container, loopback binding, Traefik route, public login,
-and media gateway:
+## Release flow
 
-```bash
-sudo bash /opt/chatbot-media-candidate/scripts/verify-primary.sh
-```
+1. Preserve a clean source commit and validate the deployment package checksums.
+2. Build an immutable candidate on a loopback-only test port with restart
+   disabled.
+3. Validate login, chat, model discovery, upload/media, workspace, and Git
+   behavior. The public HTTPS smoke must verify the local Qwen deployment.
+4. Hand port 3000 to the exact tested image while leaving Traefik unchanged.
+5. Retain the preceding container and a release-specific rollback command until
+   the public service has passed the rollback window.
 
-Restart the application with a clean Next.js cache:
+Each candidate and live release uses a unique Compose project. Candidate bind
+mounts must exist before Compose starts so missing paths cannot be silently
+created with root ownership. Only the validated live deployment receives an
+`unless-stopped` restart policy.
 
-```bash
-sudo bash /home/blechdom/.config/chatbot-media-candidate/restart-clean.sh
-```
+## Workspace adapter
 
-The restart helper retains the preceding cache privately and restores it if
-the clean restart fails. The port-3000 promotion has an independent container
-rollback under:
-
-`/home/blechdom/.config/chatbot-media-promotions/current-port3000/rollback.sh`
-
-Stopping the application requires an explicit acknowledgement because this is
-the public service:
-
-```bash
-sudo bash /opt/chatbot-media-candidate/scripts/stop-primary.sh --confirm-public-stop
-```
-
-Generated images and videos are stored under `generated-media/`. Runtime logs
-are stored under `logs/`. Both directories are ignored by Git. Browser media
-URLs require an authenticated application session; provider credentials and
-provider output URLs are not exposed to the browser.
-
-Image and video requests use the private `media-litellm-candidate` sidecar. It
-has no host port, database, or Traefik route. The shared LiteLLM deployment and
-its model database remain separate. The sidecar reads provider credentials
-through a read-only `/opt/provider-keys` mount; `.env.media` contains the
-private gateway key and is ignored by Git.
-
-The composer exposes separate Chat, Image, and Video modes. Chat models may
-understand images or videos without generating media. Image and Video modes
-list only models with a verified generation endpoint and send requests
-directly through the corresponding media transport. Assistant messages store
-the responding model and timestamp with the message.
+`services/workspace` builds the account-scoped MCP adapter that exposes only the
+assigned `creative` and `nvidia` roots. Its Compose file requires explicit host
+paths for workspaces, state, policy, and credential files. No home directory,
+SSH directory, Docker socket, or credential value is included in the image.

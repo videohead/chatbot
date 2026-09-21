@@ -1,5 +1,7 @@
 model-catalog.json
 model-catalog.*.json
+__pycache__/
+*.py[cod]
 node_modules
 .pnp
 .pnp.js
