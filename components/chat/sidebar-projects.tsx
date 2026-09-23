@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  AudioWaveform,
   Bot,
   Brain,
   Cpu,
@@ -22,9 +23,9 @@ import {
 } from "@/components/ui/sidebar";
 
 type Project = {
+  href: string;
   icon: LucideIcon;
   name: string;
-  path: string;
 };
 
 const serviceOrigin = (
@@ -32,16 +33,29 @@ const serviceOrigin = (
 ).replace(/\/$/, "");
 
 const projects: Project[] = [
-  { icon: GitBranch, name: "WorldGraphStudio", path: "/worldgraphstudio/" },
-  { icon: Layers, name: "ComfyUI", path: "/comfy/" },
-  { icon: Brain, name: "Morphazoid", path: "/morphazoid/" },
-  { icon: Film, name: "VideoBrain", path: "/videobrain/" },
-  { icon: Cpu, name: "vLLM", path: "/vllm/v1/models" },
-  { icon: Bot, name: "Agent Framework", path: "/agent-framework" },
   {
+    href: `${serviceOrigin}/worldgraphstudio/`,
+    icon: GitBranch,
+    name: "WorldGraphStudio",
+  },
+  { href: `${serviceOrigin}/comfy/`, icon: Layers, name: "ComfyUI" },
+  { href: `${serviceOrigin}/morphazoid/`, icon: Brain, name: "Morphazoid" },
+  { href: `${serviceOrigin}/videobrain/`, icon: Film, name: "VideoBrain" },
+  {
+    href: "https://audiobrain.org/",
+    icon: AudioWaveform,
+    name: "AudioBrain",
+  },
+  { href: `${serviceOrigin}/vllm/v1/models`, icon: Cpu, name: "vLLM" },
+  {
+    href: `${serviceOrigin}/agent-framework`,
+    icon: Bot,
+    name: "Agent Framework",
+  },
+  {
+    href: `${serviceOrigin}/litellm/health/liveliness`,
     icon: Network,
     name: "LiteLLM",
-    path: "/litellm/health/liveliness",
   },
 ];
 
@@ -63,7 +77,7 @@ export function SidebarProjects() {
                 className="h-8 rounded-lg text-[13px] text-sidebar-foreground/50 transition-colors duration-150 hover:bg-sidebar-accent hover:text-sidebar-foreground"
               >
                 <a
-                  href={`${serviceOrigin}${project.path}`}
+                  href={project.href}
                   onClick={closeMobile}
                   rel="noopener noreferrer"
                   target="_blank"
