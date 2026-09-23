@@ -157,6 +157,7 @@ write_release_manifest() {
     printf 'RELEASE_FILE_SHA256=%s\n' "$(sha256sum "$release_file" | cut -d' ' -f1)"
     printf 'SOURCE_COMMIT=%s\n' "$source_commit"
     printf 'MODEL_CATALOG_SHA256=%s\n' "$catalog_sha256"
+    printf 'MEDIA_BASE_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_BASE_IMAGE")"
     printf 'WEB_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_WEB_IMAGE")"
     printf 'MEDIA_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_IMAGE")"
     printf 'WORKSPACE_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_WORKSPACE_IMAGE")"
@@ -179,13 +180,13 @@ verify_release_images() {
   load_release_file "$release_file"
   manifest=$(release_manifest_path "$release_file")
   [[ -f "$manifest" && ! -L "$manifest" ]] || die "release image manifest is missing: $manifest"
-  if grep -Ev '^(RELEASE_ID=[A-Za-z0-9_.+-]+|RELEASE_FILE_SHA256=[a-f0-9]{64}|SOURCE_COMMIT=([a-f0-9]{40}|legacy)|MODEL_CATALOG_SHA256=([a-f0-9]{64}|legacy)|((WEB|MEDIA|WORKSPACE)_IMAGE_ID)=sha256:[a-f0-9]{64}|((BUILD|TEST)_COMPOSE|WORKSPACE_POLICY)_SHA256=[a-f0-9]{64})$' \
+  if grep -Ev '^(RELEASE_ID=[A-Za-z0-9_.+-]+|RELEASE_FILE_SHA256=[a-f0-9]{64}|SOURCE_COMMIT=([a-f0-9]{40}|legacy)|MODEL_CATALOG_SHA256=([a-f0-9]{64}|legacy)|((WEB|MEDIA|MEDIA_BASE|WORKSPACE)_IMAGE_ID)=sha256:[a-f0-9]{64}|((BUILD|TEST)_COMPOSE|WORKSPACE_POLICY)_SHA256=[a-f0-9]{64})$' \
     "$manifest" | grep -q .; then
     die "release image manifest is invalid: $manifest"
   fi
-  require_assignment_schema "$manifest" 10 \
+  require_assignment_schema "$manifest" 11 \
     RELEASE_ID RELEASE_FILE_SHA256 SOURCE_COMMIT MODEL_CATALOG_SHA256 \
-    WEB_IMAGE_ID MEDIA_IMAGE_ID WORKSPACE_IMAGE_ID BUILD_COMPOSE_SHA256 \
+    MEDIA_BASE_IMAGE_ID WEB_IMAGE_ID MEDIA_IMAGE_ID WORKSPACE_IMAGE_ID BUILD_COMPOSE_SHA256 \
     TEST_COMPOSE_SHA256 WORKSPACE_POLICY_SHA256
   set -a
   # shellcheck disable=SC1090
@@ -200,6 +201,8 @@ verify_release_images() {
     || die "candidate Compose snapshot changed after release creation"
   [[ "$(sha256sum "$policy_snapshot" | cut -d' ' -f1)" == "$WORKSPACE_POLICY_SHA256" ]] \
     || die "workspace policy snapshot changed after release creation"
+  [[ "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_BASE_IMAGE" 2>/dev/null || true)" == "$MEDIA_BASE_IMAGE_ID" ]] \
+    || die "media base image tag differs from its release manifest"
   [[ "$(docker image inspect --format '{{.Id}}' "$CHATBOT_WEB_IMAGE" 2>/dev/null || true)" == "$WEB_IMAGE_ID" ]] \
     || die "web image tag differs from its release manifest"
   [[ "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_IMAGE" 2>/dev/null || true)" == "$MEDIA_IMAGE_ID" ]] \
@@ -279,6 +282,198 @@ atomic_copy() {
   install -o root -g optusers -m 0640 "$source" "$tmp"
   mv -T -- "$tmp" "$target"
 }
+
+derive_media_image() (
+  set -Eeuo pipefail
+  local base_image=$1 target_image=$2 context_dir=$3 source
+  local base_id= layer_id= verify_id= target_id=
+  local verify_dir= entrypoint_sha= config_sha=
+  local may_remove_target=false keep_target=false
+
+  cleanup_media_derivation() {
+    local status=$?
+    trap - EXIT INT TERM
+    set +e
+    [[ -z "$verify_id" ]] || docker rm -fv "$verify_id" >/dev/null 2>&1
+    [[ -z "$layer_id" ]] || docker rm -fv "$layer_id" >/dev/null 2>&1
+    [[ -z "$verify_dir" || ! -e "$verify_dir" ]] \
+      || rm -rf --one-file-system -- "$verify_dir"
+    if [[ "$may_remove_target" == true && "$keep_target" == false ]]; then
+      docker image rm "$target_image" >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+  }
+  trap cleanup_media_derivation EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  [[ -d "$context_dir" && ! -L "$context_dir" ]] \
+    || { printf 'Media build context is unavailable.\n' >&2; exit 1; }
+  for source in deploy/media/Dockerfile deploy/media/entrypoint.sh config/media-litellm.yaml; do
+    [[ -f "$context_dir/$source" && ! -L "$context_dir/$source" ]] \
+      || { printf 'Required media source is unavailable: %s.\n' "$source" >&2; exit 1; }
+  done
+  python3 -I - "$context_dir/deploy/media/Dockerfile" <<'PY'
+from pathlib import Path
+import sys
+
+expected = '''ARG LITELLM_BASE_IMAGE=docker.litellm.ai/berriai/litellm:main-stable
+FROM ${LITELLM_BASE_IMAGE}
+
+USER root
+COPY --chmod=0555 deploy/media/entrypoint.sh /app/chatbot-media-entrypoint.sh
+COPY --chmod=0444 config/media-litellm.yaml /app/chatbot-media-config.yaml
+
+ENTRYPOINT ["/app/chatbot-media-entrypoint.sh"]
+CMD ["--config", "/app/chatbot-media-config.yaml"]
+'''
+if Path(sys.argv[1]).read_text() != expected:
+    raise SystemExit('Media Dockerfile changed; update and review derive_media_image before building')
+PY
+
+  base_id=$(docker image inspect --format '{{.Id}}' "$base_image" 2>/dev/null) \
+    || { printf 'Exact local media base image is unavailable.\n' >&2; exit 1; }
+  [[ "$base_id" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    || { printf 'Exact local media base identity is invalid.\n' >&2; exit 1; }
+  if docker image inspect "$target_image" >/dev/null 2>&1; then
+    printf 'Refusing to replace an existing media release image: %s.\n' "$target_image" >&2
+    exit 1
+  fi
+  may_remove_target=true
+  entrypoint_sha=$(sha256sum "$context_dir/deploy/media/entrypoint.sh" | cut -d' ' -f1)
+  config_sha=$(sha256sum "$context_dir/config/media-litellm.yaml" | cut -d' ' -f1)
+  verify_dir=$(mktemp -d "$CHATBOT_RUNTIME/media-image-verify.XXXXXX")
+  chmod 0700 "$verify_dir"
+  layer_id=$(docker create "$base_id") \
+    || { printf 'Could not create the stopped media image layer container.\n' >&2; exit 1; }
+  [[ "$(docker inspect --format '{{.Image}}' "$layer_id")" == "$base_id" ]] \
+    || { printf 'Stopped media layer container does not use the pinned base image.\n' >&2; exit 1; }
+
+  # Docker BuildKit cannot resolve this daemon-local legacy image. Inject the
+  # two tracked public files into a never-started container instead. The tar
+  # metadata reproduces the ownership and modes declared by the Dockerfile.
+  python3 -I - "$context_dir" <<'PY' | docker cp - "$layer_id:/app"
+import io
+import os
+from pathlib import Path
+import stat
+import sys
+import tarfile
+
+root = Path(sys.argv[1])
+files = (
+    ('deploy/media/entrypoint.sh', 'chatbot-media-entrypoint.sh', 0o555),
+    ('config/media-litellm.yaml', 'chatbot-media-config.yaml', 0o444),
+)
+with tarfile.open(fileobj=sys.stdout.buffer, mode='w|') as archive:
+    for relative, target, mode in files:
+        path = root / relative
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                raise SystemExit(f'Invalid media source: {relative}')
+            body = handle.read(1024 * 1024 + 1)
+            if len(body) != info.st_size:
+                raise SystemExit(f'Media source changed while reading: {relative}')
+        member = tarfile.TarInfo(target)
+        member.size = len(body)
+        member.mode = mode
+        member.uid = member.gid = 0
+        member.uname = member.gname = 'root'
+        member.mtime = 0
+        archive.addfile(member, io.BytesIO(body))
+PY
+
+  target_id=$(docker commit \
+    --change 'USER root' \
+    --change 'ENTRYPOINT ["/app/chatbot-media-entrypoint.sh"]' \
+    --change 'CMD ["--config","/app/chatbot-media-config.yaml"]' \
+    "$layer_id" "$target_image") \
+    || { printf 'Could not commit the canonical media release image.\n' >&2; exit 1; }
+  [[ "$target_id" =~ ^sha256:[a-f0-9]{64}$ \
+      && "$(docker image inspect --format '{{.Id}}' "$target_image")" == "$target_id" ]] \
+    || { printf 'Committed media image identity could not be verified.\n' >&2; exit 1; }
+
+  python3 -I - "$base_id" "$target_id" <<'PY'
+import json
+import subprocess
+import sys
+
+result = subprocess.run(
+    ['docker', 'image', 'inspect', sys.argv[1], sys.argv[2]],
+    check=True,
+    stdout=subprocess.PIPE,
+)
+base, target = json.loads(result.stdout)
+base_config = base['Config']
+target_config = target['Config']
+blocked_env = {
+    'NVIDIA_INFERENCE_API_KEY', 'NGC_API_KEY',
+    'MEDIA_LITELLM_MASTER_KEY', 'LITELLM_MASTER_KEY',
+}
+base_env_keys = {item.partition('=')[0] for item in (base_config.get('Env') or [])}
+embedded = sorted(blocked_env & base_env_keys)
+if embedded:
+    raise SystemExit('Media base image contains credential environment fields: ' + ', '.join(embedded))
+for field in ('Env', 'ExposedPorts', 'WorkingDir', 'Labels', 'Healthcheck',
+              'StopSignal', 'Shell', 'Volumes', 'OnBuild'):
+    if base_config.get(field) != target_config.get(field):
+        raise SystemExit(f'Media image changed inherited config field: {field}')
+if target_config.get('User') != 'root':
+    raise SystemExit('Media image user is invalid')
+if target_config.get('Entrypoint') != ['/app/chatbot-media-entrypoint.sh']:
+    raise SystemExit('Media image entrypoint is invalid')
+if target_config.get('Cmd') != ['--config', '/app/chatbot-media-config.yaml']:
+    raise SystemExit('Media image command is invalid')
+PY
+
+  verify_id=$(docker create "$target_id")
+  [[ "$(docker inspect --format '{{.Image}}' "$verify_id")" == "$target_id" ]] \
+    || { printf 'Media verification container does not use the committed image.\n' >&2; exit 1; }
+  docker cp "$verify_id:/app/chatbot-media-entrypoint.sh" - >"$verify_dir/entrypoint.tar"
+  docker cp "$verify_id:/app/chatbot-media-config.yaml" - >"$verify_dir/config.tar"
+  python3 -I - "$verify_dir" "$entrypoint_sha" "$config_sha" <<'PY'
+import hashlib
+from pathlib import Path
+import stat
+import sys
+import tarfile
+
+root = Path(sys.argv[1])
+checks = (
+    ('entrypoint.tar', sys.argv[2], 0o555),
+    ('config.tar', sys.argv[3], 0o444),
+)
+for filename, expected_hash, expected_mode in checks:
+    with tarfile.open(root / filename, mode='r:*') as archive:
+        regular = [member for member in archive.getmembers() if member.isfile()]
+        if len(regular) != 1:
+            raise SystemExit(f'Unexpected media verification archive: {filename}')
+        member = regular[0]
+        if member.uid != 0 or member.gid != 0 or stat.S_IMODE(member.mode) != expected_mode:
+            raise SystemExit(f'Invalid media file metadata: {filename}')
+        handle = archive.extractfile(member)
+        if handle is None:
+            raise SystemExit(f'Media file is unavailable: {filename}')
+        body = handle.read(1024 * 1024 + 1)
+        if len(body) != member.size or hashlib.sha256(body).hexdigest() != expected_hash:
+            raise SystemExit(f'Media file content mismatch: {filename}')
+PY
+  [[ "$(sha256sum "$context_dir/deploy/media/entrypoint.sh" | cut -d' ' -f1)" == "$entrypoint_sha" \
+      && "$(sha256sum "$context_dir/config/media-litellm.yaml" | cut -d' ' -f1)" == "$config_sha" ]] \
+    || { printf 'Media source changed during image derivation.\n' >&2; exit 1; }
+
+  docker rm -fv "$verify_id" >/dev/null
+  verify_id=
+  docker rm -fv "$layer_id" >/dev/null
+  layer_id=
+  rm -rf --one-file-system -- "$verify_dir"
+  verify_dir=
+  [[ "$(docker image inspect --format '{{.Id}}' "$target_image")" == "$target_id" ]] \
+    || { printf 'Media release image tag changed during validation.\n' >&2; exit 1; }
+  keep_target=true
+)
 
 container_health() {
   docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' "$1" 2>/dev/null || true

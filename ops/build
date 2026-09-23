@@ -14,6 +14,7 @@ acquire_operation_lock
 base_release=$CHATBOT_CURRENT_RELEASE
 [[ -f "$base_release" ]] || die "canonical deployment is not initialized"
 load_release_file "$base_release"
+verify_release_images "$base_release"
 
 commit=$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)
 catalog_sha256=$(sha256sum "$CHATBOT_ROOT/model-catalog.json" | cut -d' ' -f1)
@@ -64,11 +65,22 @@ chmod 0640 "$release_file"
 validate_release_file "$release_file"
 snapshot_release_configuration "$release_file"
 
-CHATBOT_PROJECT_NAME=chatbot-build \
-CHATBOT_BUILD_CONTEXT="$build_context" \
-CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
-  docker compose --env-file "$release_file" -f "$compose_snapshot" \
-    build --builder default web media workspace
+if [[ "$CHATBOT_MEDIA_BASE_IMAGE" == local/chatbot-media-base:* ]]; then
+  # Legacy daemon-local bases are deliberately unavailable to BuildKit. The
+  # reviewed helper enforces the same two-file Dockerfile contract offline.
+  CHATBOT_PROJECT_NAME=chatbot-build \
+  CHATBOT_BUILD_CONTEXT="$build_context" \
+  CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
+    docker compose --env-file "$release_file" -f "$compose_snapshot" \
+      build --builder default web workspace
+  derive_media_image "$CHATBOT_MEDIA_BASE_IMAGE" "$CHATBOT_MEDIA_IMAGE" "$build_context"
+else
+  CHATBOT_PROJECT_NAME=chatbot-build \
+  CHATBOT_BUILD_CONTEXT="$build_context" \
+  CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
+    docker compose --env-file "$release_file" -f "$compose_snapshot" \
+      build --builder default web media workspace
+fi
 
 [[ "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)" == "$commit" ]] \
   || die "source commit changed during the build"

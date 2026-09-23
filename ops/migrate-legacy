@@ -438,11 +438,7 @@ EOF
   docker image tag "$workspace_id" "local/chatbot-workspace:legacy-$slug"
   [[ "$(docker image inspect --format '{{.Id}}' "$media_base")" == "$media_id" ]] \
     || die "the exact legacy media image was not retained under its release tag"
-  CHATBOT_PROJECT_NAME=chatbot-build \
-  CHATBOT_BUILD_CONTEXT="$CHATBOT_ROOT" \
-  CHATBOT_WORKSPACE_BUILD_CONTEXT="$CHATBOT_ROOT/services/workspace" \
-    docker compose --env-file "$release_file" \
-      -f "$(release_compose_path "$release_file")" build --builder default media
+  derive_media_image "$media_base" "local/chatbot-media:legacy-$slug" "$CHATBOT_ROOT"
   write_release_manifest "$release_file" legacy legacy
   rm -f -- "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"
   atomic_copy "$release_file" "$CHATBOT_PENDING_RELEASE"
