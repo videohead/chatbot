@@ -113,13 +113,16 @@ release_policy_path() {
 }
 
 require_release_configuration() {
-  local release_file=$1 path
+  local release_file=$1 path policy_snapshot
   for path in \
     "$(release_compose_path "$release_file")" \
     "$(release_test_compose_path "$release_file")" \
     "$(release_policy_path "$release_file")"; do
     [[ -f "$path" && ! -L "$path" ]] || die "release configuration snapshot is missing: $path"
   done
+  policy_snapshot=$(release_policy_path "$release_file")
+  [[ "$(stat -c '%u:%g:%a' "$policy_snapshot")" == 1000:1000:400 ]] \
+    || die "workspace policy snapshot does not have private container-readable ownership and mode"
 }
 
 snapshot_release_configuration() {
@@ -130,7 +133,7 @@ snapshot_release_configuration() {
   policy_snapshot=$(release_policy_path "$release_file")
   install -o root -g optusers -m 0640 "$CHATBOT_COMPOSE" "$compose_snapshot"
   install -o root -g optusers -m 0640 "$CHATBOT_TEST_COMPOSE" "$test_snapshot"
-  install -o 1000 -g optusers -m 0440 \
+  install -o 1000 -g 1000 -m 0400 \
     "$CHATBOT_ROOT/config/workspace-policy.json" "$policy_snapshot"
   require_release_configuration "$release_file"
 }
