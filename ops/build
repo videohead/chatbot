@@ -68,7 +68,7 @@ CHATBOT_PROJECT_NAME=chatbot-build \
 CHATBOT_BUILD_CONTEXT="$build_context" \
 CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
   docker compose --env-file "$release_file" -f "$compose_snapshot" \
-    build web media workspace
+    build --builder default web media workspace
 
 [[ "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)" == "$commit" ]] \
   || die "source commit changed during the build"

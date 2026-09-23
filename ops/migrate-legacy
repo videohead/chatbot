@@ -139,6 +139,7 @@ normalize_source_ownership() {
 }
 
 restore_legacy() {
+  local state_transferred=${1:-true}
   if ! live_compose "$MIGRATION_RELEASE_FILE" down >/dev/null; then
     printf 'Canonical Compose project could not be stopped before workspace-state recovery.\n' >&2
     return 1
@@ -150,7 +151,7 @@ restore_legacy() {
     return 1
   fi
   local state_sync_ok=true
-  if [[ ${workspace_state_transferred:-true} == true ]] \
+  if [[ "$state_transferred" == true ]] \
     && ! sync_workspace_state_offline "$CHATBOT_RUNTIME/workspace" "$LEGACY_WORKSPACE_STATE"; then
     state_sync_ok=false
     printf '%s\n' \
@@ -420,13 +421,11 @@ EOF
   chmod 0640 "$migration_file"
   load_migration_file
 
-  local prepare_complete=false
   recover_prepare_failure() {
     local status=$?
     trap - EXIT INT TERM
-    if [[ "$prepare_complete" == false ]]; then
-      discard_incomplete_prepare
-    fi
+    set +e
+    discard_incomplete_prepare
     exit "$status"
   }
   trap recover_prepare_failure EXIT
@@ -437,17 +436,18 @@ EOF
   docker image tag "$web_id" "local/chatbot-web:legacy-$slug"
   docker image tag "$media_id" "$media_base"
   docker image tag "$workspace_id" "local/chatbot-workspace:legacy-$slug"
+  [[ "$(docker image inspect --format '{{.Id}}' "$media_base")" == "$media_id" ]] \
+    || die "the exact legacy media image was not retained under its release tag"
   CHATBOT_PROJECT_NAME=chatbot-build \
   CHATBOT_BUILD_CONTEXT="$CHATBOT_ROOT" \
   CHATBOT_WORKSPACE_BUILD_CONTEXT="$CHATBOT_ROOT/services/workspace" \
     docker compose --env-file "$release_file" \
-      -f "$(release_compose_path "$release_file")" build media
+      -f "$(release_compose_path "$release_file")" build --builder default media
   write_release_manifest "$release_file" legacy legacy
   rm -f -- "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"
   atomic_copy "$release_file" "$CHATBOT_PENDING_RELEASE"
   /opt/chatbot/ops/candidate "$release_file"
   write_phase prepared
-  prepare_complete=true
   trap - EXIT INT TERM
   printf '%s\n' \
     'Canonical candidate preparation completed without changing the public service.' \
@@ -471,23 +471,24 @@ promote() {
   [[ "$(docker inspect --format '{{.Id}}' "$legacy_workspace" 2>/dev/null || true)" == "$LEGACY_WORKSPACE_ID" ]] \
     || die "legacy workspace container changed after preparation"
 
-  local handoff=false completed=false workspace_state_transferred=false
   recover_on_failure() {
-    local status=$?
+    local status=$? state_transferred=${1:-false}
     trap - EXIT INT TERM
-    if [[ "$handoff" == true && "$completed" == false ]]; then
-      printf 'Canonical cutover failed; restoring the exact legacy containers.\n' >&2
-      if ! restore_legacy; then
-        printf 'URGENT: automatic restoration did not complete; inspect with /opt/chatbot/ops/migrate-legacy status.\n' >&2
-      fi
+    set +e
+    printf 'Canonical cutover failed; restoring the exact legacy containers.\n' >&2
+    if ! restore_legacy "$state_transferred"; then
+      printf 'URGENT: automatic restoration did not complete; inspect with /opt/chatbot/ops/migrate-legacy status.\n' >&2
     fi
     exit "$status"
   }
-  trap recover_on_failure EXIT
+
+  # Arm recovery only when the first live mutation is about to begin. Pass the
+  # workspace-state handoff explicitly because EXIT traps run after function
+  # locals have unwound.
+  trap 'recover_on_failure false' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 
-  handoff=true
   docker update --restart=no "$legacy_web" "$legacy_media" "$legacy_workspace" >/dev/null
   docker stop "$legacy_web" >/dev/null
   copy_logs "$legacy_web"
@@ -496,7 +497,7 @@ promote() {
     || die "legacy workspace did not stop cleanly before state transfer"
   sync_workspace_state_offline "$LEGACY_WORKSPACE_STATE" "$CHATBOT_RUNTIME/workspace" \
     || die "legacy workspace state could not be validated and transferred"
-  workspace_state_transferred=true
+  trap 'recover_on_failure true' EXIT
   docker rename "$legacy_web" "$LEGACY_WEB_BACKUP"
   docker rename "$legacy_media" "$LEGACY_MEDIA_BACKUP"
   docker rename "$legacy_workspace" "$LEGACY_WORKSPACE_BACKUP"
@@ -508,8 +509,6 @@ promote() {
     || die "Traefik changed during cutover"
   write_phase promoted
 
-  completed=true
-  handoff=false
   trap - EXIT INT TERM
   if ! test_compose "$MIGRATION_RELEASE_FILE" down --remove-orphans; then
     printf 'Warning: production is healthy, but the loopback candidate could not be removed; run sudo /opt/chatbot/ops/cleanup.\n' >&2
