@@ -64,6 +64,10 @@ chown root:optusers "$release_file"
 chmod 0640 "$release_file"
 validate_release_file "$release_file"
 snapshot_release_configuration "$release_file"
+# Values exported while loading the base release take precedence over
+# --env-file in Compose. Load the new release before building so its immutable
+# tags, rather than the base release tags, receive the new images.
+load_release_file "$release_file"
 
 if [[ "$CHATBOT_MEDIA_BASE_IMAGE" == local/chatbot-media-base:* ]]; then
   # Legacy daemon-local bases are deliberately unavailable to BuildKit. The

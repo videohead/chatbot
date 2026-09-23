@@ -148,6 +148,7 @@ release_manifest_path() {
 write_release_manifest() {
   local release_file=$1 source_commit=$2 catalog_sha256=$3 manifest tmp
   local compose_snapshot test_snapshot policy_snapshot
+  local media_base_image_id web_image_id media_image_id workspace_image_id
   load_release_file "$release_file"
   require_release_configuration "$release_file"
   compose_snapshot=$(release_compose_path "$release_file")
@@ -155,15 +156,23 @@ write_release_manifest() {
   policy_snapshot=$(release_policy_path "$release_file")
   manifest=$(release_manifest_path "$release_file")
   tmp="${manifest}.tmp.$$"
+  media_base_image_id=$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_BASE_IMAGE") \
+    || die "media base image is unavailable while recording the release"
+  web_image_id=$(docker image inspect --format '{{.Id}}' "$CHATBOT_WEB_IMAGE") \
+    || die "web image is unavailable while recording the release"
+  media_image_id=$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_IMAGE") \
+    || die "media image is unavailable while recording the release"
+  workspace_image_id=$(docker image inspect --format '{{.Id}}' "$CHATBOT_WORKSPACE_IMAGE") \
+    || die "workspace image is unavailable while recording the release"
   {
     printf 'RELEASE_ID=%s\n' "$CHATBOT_RELEASE_ID"
     printf 'RELEASE_FILE_SHA256=%s\n' "$(sha256sum "$release_file" | cut -d' ' -f1)"
     printf 'SOURCE_COMMIT=%s\n' "$source_commit"
     printf 'MODEL_CATALOG_SHA256=%s\n' "$catalog_sha256"
-    printf 'MEDIA_BASE_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_BASE_IMAGE")"
-    printf 'WEB_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_WEB_IMAGE")"
-    printf 'MEDIA_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_MEDIA_IMAGE")"
-    printf 'WORKSPACE_IMAGE_ID=%s\n' "$(docker image inspect --format '{{.Id}}' "$CHATBOT_WORKSPACE_IMAGE")"
+    printf 'MEDIA_BASE_IMAGE_ID=%s\n' "$media_base_image_id"
+    printf 'WEB_IMAGE_ID=%s\n' "$web_image_id"
+    printf 'MEDIA_IMAGE_ID=%s\n' "$media_image_id"
+    printf 'WORKSPACE_IMAGE_ID=%s\n' "$workspace_image_id"
     printf 'BUILD_COMPOSE_SHA256=%s\n' "$(sha256sum "$compose_snapshot" | cut -d' ' -f1)"
     printf 'TEST_COMPOSE_SHA256=%s\n' "$(sha256sum "$test_snapshot" | cut -d' ' -f1)"
     printf 'WORKSPACE_POLICY_SHA256=%s\n' "$(sha256sum "$policy_snapshot" | cut -d' ' -f1)"

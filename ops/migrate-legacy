@@ -49,6 +49,86 @@ write_migration_release() {
   mv -T -- "$tmp" "$migration_file"
 }
 
+restore_recorded_release_tags() {
+  local release_file=$1 manifest service image expected current stale tag_count
+  local -a stale_images=()
+  validate_release_file "$release_file"
+  manifest=$(release_manifest_path "$release_file")
+  [[ -f "$manifest" && ! -L "$manifest" ]] \
+    || die "release image manifest is missing: $manifest"
+  if grep -Ev '^(RELEASE_ID=[A-Za-z0-9_.+-]+|RELEASE_FILE_SHA256=[a-f0-9]{64}|SOURCE_COMMIT=([a-f0-9]{40}|legacy)|MODEL_CATALOG_SHA256=([a-f0-9]{64}|legacy)|((WEB|MEDIA|MEDIA_BASE|WORKSPACE)_IMAGE_ID)=sha256:[a-f0-9]{64}|((BUILD|TEST)_COMPOSE|WORKSPACE_POLICY)_SHA256=[a-f0-9]{64})$' \
+    "$manifest" | grep -q .; then
+    die "release image manifest is invalid: $manifest"
+  fi
+  require_assignment_schema "$manifest" 11 \
+    RELEASE_ID RELEASE_FILE_SHA256 SOURCE_COMMIT MODEL_CATALOG_SHA256 \
+    MEDIA_BASE_IMAGE_ID WEB_IMAGE_ID MEDIA_IMAGE_ID WORKSPACE_IMAGE_ID \
+    BUILD_COMPOSE_SHA256 TEST_COMPOSE_SHA256 WORKSPACE_POLICY_SHA256
+  load_release_file "$release_file"
+  set -a
+  # The strict validator above limits the manifest to hashes and identifiers.
+  # shellcheck disable=SC1090
+  source "$manifest"
+  set +a
+  for service in web media media-base workspace; do
+    case "$service" in
+      web) image=$CHATBOT_WEB_IMAGE; expected=$WEB_IMAGE_ID ;;
+      media) image=$CHATBOT_MEDIA_IMAGE; expected=$MEDIA_IMAGE_ID ;;
+      media-base) image=$CHATBOT_MEDIA_BASE_IMAGE; expected=$MEDIA_BASE_IMAGE_ID ;;
+      workspace) image=$CHATBOT_WORKSPACE_IMAGE; expected=$WORKSPACE_IMAGE_ID ;;
+    esac
+    docker image inspect "$expected" >/dev/null 2>&1 \
+      || die "recorded $service image is unavailable: $expected"
+    current=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
+    if [[ "$current" != "$expected" ]]; then
+      docker image tag "$expected" "$image"
+      [[ "$current" =~ ^sha256:[a-f0-9]{64}$ ]] && stale_images+=("$current")
+    fi
+  done
+  verify_release_images "$release_file"
+  # Remove only now-untagged images displaced by the interrupted build. An
+  # image with another tag or any container reference is left untouched.
+  for stale in "${stale_images[@]}"; do
+    tag_count=$(docker image inspect --format '{{len .RepoTags}}' "$stale" 2>/dev/null || true)
+    if [[ "$tag_count" == 0 ]] \
+      && ! docker ps -aq --filter "ancestor=$stale" | grep -q .; then
+      docker image rm "$stale" >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+discard_interrupted_source_builds() {
+  local protected_release=$1 build_dir release_id release_file manifest
+  local compose_snapshot test_snapshot policy_snapshot image
+  shopt -s nullglob
+  for build_dir in "$CHATBOT_RUNTIME/build/"*; do
+    [[ -d "$build_dir" && ! -L "$build_dir" ]] \
+      || die "unexpected entry in the release-build directory: $build_dir"
+    release_id=$(basename "$build_dir")
+    [[ "$release_id" =~ ^[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}$ ]] \
+      || die "unexpected interrupted release-build directory: $build_dir"
+    release_file="$CHATBOT_RUNTIME/releases/$release_id.env"
+    [[ -f "$release_file" && ! -L "$release_file" ]] \
+      || die "interrupted release file is unavailable: $release_file"
+    [[ "$release_file" != "$protected_release" ]] \
+      || die "the active migration release has an unexpected build directory"
+    validate_release_file "$release_file"
+    load_release_file "$release_file"
+    for image in "$CHATBOT_WEB_IMAGE" "$CHATBOT_MEDIA_IMAGE" "$CHATBOT_WORKSPACE_IMAGE"; do
+      docker image rm "$image" >/dev/null 2>&1 || true
+    done
+    manifest=$(release_manifest_path "$release_file")
+    compose_snapshot=$(release_compose_path "$release_file")
+    test_snapshot=$(release_test_compose_path "$release_file")
+    policy_snapshot=$(release_policy_path "$release_file")
+    rm -f -- "$release_file" "$manifest" "$compose_snapshot" \
+      "$test_snapshot" "$policy_snapshot"
+    rm -rf --one-file-system -- "$build_dir"
+    printf 'Removed interrupted source-build release %s.\n' "$release_id"
+  done
+  shopt -u nullglob
+}
+
 copy_logs() {
   local container=$1 source
   source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/logs"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
@@ -476,13 +556,18 @@ EOF
     '  sudo /opt/chatbot/ops/migrate-legacy promote'
 }
 
-build_candidate() {
+build_candidate() (
   load_migration_file
   [[ "$MIGRATION_PHASE" == prepared ]] \
     || die "migration phase is $MIGRATION_PHASE, expected prepared"
   local preceding_release=$MIGRATION_RELEASE_FILE
   validate_release_file "$preceding_release"
-  verify_release_images "$preceding_release"
+  # An interrupted build may have targeted the preceding tags if stale shell
+  # variables overrode its env file. Restore those immutable tags first, then
+  # remove only unreferenced build directories left by interrupted attempts.
+  restore_recorded_release_tags "$preceding_release"
+  discard_interrupted_source_builds "$preceding_release"
+  restore_recorded_release_tags "$preceding_release"
 
   [[ -z "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" \
     status --porcelain --untracked-files=all)" ]] \
@@ -570,6 +655,9 @@ EOF
   chmod 0640 "$release_file"
   validate_release_file "$release_file"
   snapshot_release_configuration "$release_file"
+  # Compose gives exported shell variables precedence over --env-file. The
+  # preceding release was loaded above, so explicitly export the new tags.
+  load_release_file "$release_file"
 
   CHATBOT_PROJECT_NAME=chatbot-build \
   CHATBOT_BUILD_CONTEXT="$build_context" \
@@ -600,7 +688,7 @@ EOF
     'The public service on port 3000 was not changed.' \
     'After testing the sidebar, login, models, media, and workspace tools, promote with:' \
     '  sudo /opt/chatbot/ops/migrate-legacy promote'
-}
+)
 
 promote() {
   load_migration_file
