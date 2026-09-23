@@ -285,13 +285,13 @@ container_health() {
 }
 
 load_migration_file() {
-  local migration_file="$CHATBOT_RUNTIME/migration.env"
-  [[ -f "$migration_file" && ! -L "$migration_file" ]] || die "legacy migration record is missing"
+  local migration_record="$CHATBOT_RUNTIME/migration.env"
+  [[ -f "$migration_record" && ! -L "$migration_record" ]] || die "legacy migration record is missing"
   if grep -Ev '^(MIGRATION_(PHASE|ID|RELEASE_FILE)|LEGACY_(WEB|MEDIA|WORKSPACE)_(ID|BACKUP|RESTART)|LEGACY_WORKSPACE_STATE|TRAEFIK_SHA256)=[A-Za-z0-9_./:@+-]+$' \
-    "$migration_file" | grep -q .; then
+    "$migration_record" | grep -q .; then
     die "legacy migration record contains an unsupported field or value"
   fi
-  require_assignment_schema "$migration_file" 14 \
+  require_assignment_schema "$migration_record" 14 \
     MIGRATION_PHASE MIGRATION_ID MIGRATION_RELEASE_FILE \
     LEGACY_WEB_ID LEGACY_WEB_BACKUP LEGACY_WEB_RESTART \
     LEGACY_MEDIA_ID LEGACY_MEDIA_BACKUP LEGACY_MEDIA_RESTART \
@@ -300,7 +300,7 @@ load_migration_file() {
   set -a
   # The validator above restricts this file to identifiers, paths, and hashes.
   # shellcheck disable=SC1090
-  source "$migration_file"
+  source "$migration_record"
   set +a
 }
 

@@ -35,7 +35,7 @@ copy_logs() {
   local container=$1 source
   source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/logs"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
   [[ -n "$source" && -d "$source" ]] || return 0
-  cp -a --no-clobber "$source/." "$CHATBOT_ROOT/logs/"
+  cp -a --update=none "$source/." "$CHATBOT_ROOT/logs/"
   chown -R 1000:optusers "$CHATBOT_ROOT/logs"
   find "$CHATBOT_ROOT/logs" -type d -exec chmod 2770 {} +
   find "$CHATBOT_ROOT/logs" -type f -exec chmod 0660 {} +
@@ -314,11 +314,15 @@ for path in paths:
 PY
   install -d -o root -g optusers -m 2770 /var/backups/chatbot
   local bundle=/var/backups/chatbot/canonical-compose-review-2026-09-23.bundle
+  local bundle_tmp="${bundle}.tmp.$$"
+  trap 'rm -f -- "$bundle_tmp"' RETURN
   git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" bundle create \
-    "$bundle" "$safety_ref" "$review_ref"
-  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" bundle verify "$bundle" >/dev/null
-  chown root:optusers "$bundle"
-  chmod 0640 "$bundle"
+    "$bundle_tmp" "$safety_ref" "$review_ref"
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" bundle verify "$bundle_tmp" >/dev/null
+  chown root:optusers "$bundle_tmp"
+  chmod 0640 "$bundle_tmp"
+  mv -T -- "$bundle_tmp" "$bundle"
+  trap - RETURN
   normalize_source_ownership
 
   for secret in auth-secret postgres-password litellm-client.key media-litellm-master.key; do
