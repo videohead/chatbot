@@ -42,7 +42,7 @@ const projects: Project[] = [
   { href: `${serviceOrigin}/morphazoid/`, icon: Brain, name: "Morphazoid" },
   { href: `${serviceOrigin}/videobrain/`, icon: Film, name: "VideoBrain" },
   {
-    href: "https://audiobrain.org/",
+    href: `${serviceOrigin}/audiobrain/`,
     icon: AudioWaveform,
     name: "AudioBrain",
   },
