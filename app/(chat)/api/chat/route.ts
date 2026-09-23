@@ -9,7 +9,6 @@ import {
   isStepCount,
   jsonSchema,
   streamText,
-  type ToolSet,
   toUIMessageStream,
 } from "ai";
 import { checkBotId } from "botid/server";
@@ -18,39 +17,20 @@ import { createResumableStreamContext } from "resumable-stream";
 import { auth, type UserType } from "@/app/(auth)/auth";
 import { entitlementsByUserType } from "@/lib/ai/entitlements";
 import {
-  getAllowedModelIds,
   getCapabilities,
+  getAllowedModelIds,
   getModelAvailability,
   getModelConfig,
 } from "@/lib/ai/litellm";
-import {
-  normalizeImageSize,
-  normalizeVideoQuality,
-  supportsImageInput,
-  supportsVideoFileInput,
-  supportsVideoImageInput,
-} from "@/lib/ai/media-settings";
 import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
-import { createDocument } from "@/lib/ai/tools/create-document";
 import { createAgentFrameworkTool } from "@/lib/ai/tools/delegate-agent-framework";
+import { createDocument } from "@/lib/ai/tools/create-document";
 import { editDocument } from "@/lib/ai/tools/edit-document";
-import {
-  createGenerateImageTool,
-  generateImageForChat,
-} from "@/lib/ai/tools/generate-image";
-import {
-  createGenerateVideoTool,
-  generateVideo,
-} from "@/lib/ai/tools/generate-video";
 import { getWeather } from "@/lib/ai/tools/get-weather";
 import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
 import { updateDocument } from "@/lib/ai/tools/update-document";
-import {
-  createWorkspaceTools,
-  hasWorkspaceAccess,
-} from "@/lib/ai/tools/workspace";
 import { isProductionEnvironment } from "@/lib/constants";
 import {
   createStreamId,
@@ -66,191 +46,86 @@ import {
 import type { DBMessage } from "@/lib/db/schema";
 import { ChatbotError } from "@/lib/errors";
 import { logger } from "@/lib/logger";
-import { resolveMediaInputUrl } from "@/lib/media-storage";
-import { persistMessageParts } from "@/lib/message-attribution";
 import { checkIpRateLimit } from "@/lib/ratelimit";
 import type { ChatMessage, WaitingStatusData } from "@/lib/types";
 import { convertToUIMessages, generateUUID } from "@/lib/utils";
 import { generateTitleFromUserMessage } from "../../actions";
 import { type PostRequestBody, postRequestBodySchema } from "./schema";
 
-export const maxDuration = 600;
+export const maxDuration = 60;
 
 const HEALTH_CHECK_DELAY_MS = 9000;
-const directMcpToolsEnabled =
-  process.env.CHATBOT_ENABLE_DIRECT_MCP_TOOLS === "true";
-const workspaceToolNames = [
-  "gitAuthStatus",
-  "gitClone",
-  "gitCommit",
-  "gitCreateBranch",
-  "gitDiff",
-  "gitFetch",
-  "gitLog",
-  "gitPull",
-  "gitPush",
-  "gitRemoteCheck",
-  "gitRepoInfo",
-  "gitSetIdentity",
-  "gitStage",
-  "gitStatus",
-  "workspaceList",
-  "workspaceRead",
-  "workspaceProposePatch",
-  "workspaceApplyPatch",
-] as const;
-
-function videoStatusModelName(modelId: string) {
-  if (modelId.includes("cosmos3-super")) {
-    return "Cosmos3 Super";
-  }
-  if (modelId.includes("cosmos3-nano")) {
-    return "Cosmos3 Nano";
-  }
-  if (modelId.includes("gemini-omni")) {
-    return "Gemini Omni Flash Preview";
-  }
-  if (modelId.includes("veo-3.1")) {
-    return "Veo 3.1";
-  }
-  if (modelId.includes("veo-3.0")) {
-    return "Veo 3.0";
-  }
-  return modelId;
-}
-
-type DirectMediaRecord = {
-  createdAt: Date;
-  input: {
-    model: string;
-    prompt: string;
-    quality?: string;
-    size?: string;
-    sourceImage?: string;
-    sourceVideo?: string;
-  };
-  kind: "image" | "video";
-  messageId: string;
-  modelId: string;
-  modelName: string;
-  toolCallId: string;
-};
-
-function directMediaParts(
-  record: DirectMediaRecord,
-  output?: Record<string, unknown>
-): DBMessage["parts"] {
-  const model =
-    typeof output?.model === "string" ? output.model : record.modelId;
-  const modelName =
-    typeof output?.modelName === "string" ? output.modelName : record.modelName;
-  const toolType =
-    record.kind === "image" ? "tool-generateImage" : "tool-generateVideo";
-
-  return [
-    { type: "step-start" },
-    {
-      input: record.input,
-      ...(output ? { output } : {}),
-      state: output ? "output-available" : "input-available",
-      toolCallId: record.toolCallId,
-      type: toolType,
-    },
-    {
-      data: { model, modelName },
-      type: "data-model-attribution",
-    },
-  ] as DBMessage["parts"];
-}
-
-function hasPendingDirectMedia(messages: DBMessage[]) {
-  return messages.some(
-    (storedMessage) =>
-      storedMessage.role === "assistant" &&
-      Array.isArray(storedMessage.parts) &&
-      storedMessage.parts.some((part) => {
-        if (!part || typeof part !== "object") {
-          return false;
-        }
-        const candidate = part as { state?: unknown; type?: unknown };
-        return (
-          (candidate.type === "tool-generateImage" ||
-            candidate.type === "tool-generateVideo") &&
-          (candidate.state === "input-available" ||
-            candidate.state === "input-streaming")
-        );
-      })
-  );
-}
-
-async function hydrateOwnedMediaForModel(
-  messages: ChatMessage[],
-  userId: string
-) {
-  return (await Promise.all(
-    messages.map(async (chatMessage) => ({
-      ...chatMessage,
-      parts: await Promise.all(
-        chatMessage.parts.map(async (part) => {
-          if (part.type !== "file" || !part.mediaType.startsWith("image/")) {
-            return part;
-          }
-          return {
-            ...part,
-            url: await resolveMediaInputUrl({
-              mediaType: part.mediaType,
-              url: part.url,
-              userId,
-            }),
-          };
-        })
-      ),
-    }))
-  )) as ChatMessage[];
-}
 
 const mcpGatewayHandledOutput = {
   status: "handled_by_litellm_mcp_gateway",
 };
 
-function createMessageMetadataHandler({
-  modelId,
-  modelName,
-}: {
-  modelId: string;
-  modelName: string;
-}) {
-  const createdAt = new Date().toISOString();
-
-  return ({ part }: { part: { type: string } }) => {
-    if (part.type === "start" || part.type === "finish") {
-      return {
-        createdAt,
-        model: modelId,
-        modelName,
-      };
-    }
-  };
-}
-
-const stringInputSchema = (
-  required: string[],
-  properties: Record<string, any>
-) =>
+const stringInputSchema = (required: string[], properties: Record<string, any>) =>
   jsonSchema({
-    additionalProperties: false,
+    type: "object",
     properties,
     required,
-    type: "object",
+    additionalProperties: false,
   });
 
 const litellmMcpTools = {
+  "metis_router-filesystem:execute_command": dynamicTool({
+    description: "Execute a shell command through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["command"], {
+      command: { type: "string" },
+      working_dir: { type: "string" },
+    }),
+  }),
+  "metis_router-filesystem:list_directory": dynamicTool({
+    description: "List a directory through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["path"], { path: { type: "string" } }),
+  }),
+  "metis_router-filesystem:read_file": dynamicTool({
+    description: "Read a file through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["file_path"], {
+      file_path: { type: "string" },
+    }),
+  }),
+  "metis_router-filesystem:write_file": dynamicTool({
+    description: "Write a file through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["file_path", "content"], {
+      file_path: { type: "string" },
+      content: { type: "string" },
+      create_dirs: { type: "boolean" },
+    }),
+  }),
+  "metis_router-filesystem:update_file": dynamicTool({
+    description: "Update a file through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(
+      ["file_path", "old_string", "new_string"],
+      {
+        file_path: { type: "string" },
+        old_string: { type: "string" },
+        new_string: { type: "string" },
+        replace_all: { type: "boolean" },
+      }
+    ),
+  }),
   "metis_router-filesystem:create_directory": dynamicTool({
     description: "Create a directory through the LiteLLM MCP gateway.",
     execute: async () => mcpGatewayHandledOutput,
     inputSchema: stringInputSchema(["path"], {
-      parents: { type: "boolean" },
       path: { type: "string" },
+      parents: { type: "boolean" },
+    }),
+  }),
+  "metis_router-filesystem:move_path": dynamicTool({
+    description: "Move a filesystem path through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["source", "destination"], {
+      source: { type: "string" },
+      destination: { type: "string" },
+      overwrite: { type: "boolean" },
     }),
   }),
   "metis_router-filesystem:delete_path": dynamicTool({
@@ -261,14 +136,6 @@ const litellmMcpTools = {
       recursive: { type: "boolean" },
     }),
   }),
-  "metis_router-filesystem:execute_command": dynamicTool({
-    description: "Execute a shell command through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["command"], {
-      command: { type: "string" },
-      working_dir: { type: "string" },
-    }),
-  }),
   "metis_router-filesystem:filesystem_diagnostics": dynamicTool({
     description: "Run filesystem diagnostics through the LiteLLM MCP gateway.",
     execute: async () => mcpGatewayHandledOutput,
@@ -276,51 +143,6 @@ const litellmMcpTools = {
       path: { type: "string" },
       probe_write: { type: "boolean" },
     }),
-  }),
-  "metis_router-filesystem:list_directory": dynamicTool({
-    description: "List a directory through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["path"], { path: { type: "string" } }),
-  }),
-  "metis_router-filesystem:move_path": dynamicTool({
-    description: "Move a filesystem path through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["source", "destination"], {
-      destination: { type: "string" },
-      overwrite: { type: "boolean" },
-      source: { type: "string" },
-    }),
-  }),
-  "metis_router-filesystem:read_file": dynamicTool({
-    description: "Read a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["file_path"], {
-      file_path: { type: "string" },
-    }),
-  }),
-  "metis_router-filesystem:update_file": dynamicTool({
-    description: "Update a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["file_path", "old_string", "new_string"], {
-      file_path: { type: "string" },
-      new_string: { type: "string" },
-      old_string: { type: "string" },
-      replace_all: { type: "boolean" },
-    }),
-  }),
-  "metis_router-filesystem:write_file": dynamicTool({
-    description: "Write a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["file_path", "content"], {
-      content: { type: "string" },
-      create_dirs: { type: "boolean" },
-      file_path: { type: "string" },
-    }),
-  }),
-  "metis_router-ubuntu-controller:get_job_status": dynamicTool({
-    description: "Get background job status through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema(["job_id"], { job_id: { type: "string" } }),
   }),
   "metis_router-ubuntu-controller:get_system_info": dynamicTool({
     description: "Get system information through the LiteLLM MCP gateway.",
@@ -334,11 +156,6 @@ const litellmMcpTools = {
       package_name: { type: "string" },
     }),
   }),
-  "metis_router-ubuntu-controller:list_background_jobs": dynamicTool({
-    description: "List background jobs through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
-    inputSchema: stringInputSchema([], {}),
-  }),
   "metis_router-ubuntu-controller:search_packages": dynamicTool({
     description: "Search packages through the LiteLLM MCP gateway.",
     execute: async () => mcpGatewayHandledOutput,
@@ -351,6 +168,16 @@ const litellmMcpTools = {
       command: { type: "string" },
       working_dir: { type: "string" },
     }),
+  }),
+  "metis_router-ubuntu-controller:get_job_status": dynamicTool({
+    description: "Get background job status through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema(["job_id"], { job_id: { type: "string" } }),
+  }),
+  "metis_router-ubuntu-controller:list_background_jobs": dynamicTool({
+    description: "List background jobs through the LiteLLM MCP gateway.",
+    execute: async () => mcpGatewayHandledOutput,
+    inputSchema: stringInputSchema([], {}),
   }),
 };
 
@@ -389,31 +216,16 @@ export async function POST(request: Request) {
   }
 
   try {
-    const {
-      generationMode,
-      id,
-      message,
-      messages,
-      selectedChatModel,
-      selectedImageModel,
-      selectedImageSize,
-      selectedVideoModel,
-      selectedVideoQuality,
-      selectedVisibilityType,
-    } = requestBody;
+    const { id, message, messages, selectedChatModel, selectedVisibilityType } =
+      requestBody;
 
     logger.info("chat.post.start", {
       body: process.env.CHATBOT_LOG_BODIES === "true" ? requestBody : undefined,
       chatId: id,
-      generationMode,
       hasApprovalMessages: Boolean(messages),
       messageId: message?.id,
       messagePartCount: message?.parts?.length,
       selectedChatModel,
-      selectedImageModel,
-      selectedImageSize,
-      selectedVideoModel,
-      selectedVideoQuality,
       selectedVisibilityType,
     });
 
@@ -440,9 +252,6 @@ export async function POST(request: Request) {
       return new ChatbotError("unauthorized:chat").toResponse();
     }
 
-    const workspaceAccess = hasWorkspaceAccess(session);
-    const workspaceTools: ToolSet = createWorkspaceTools(session);
-
     const allowedModelIds = await getAllowedModelIds();
     const chatModel = allowedModelIds.has(selectedChatModel)
       ? selectedChatModel
@@ -457,7 +266,7 @@ export async function POST(request: Request) {
       id: session.user.id,
     });
 
-    if (messageCount >= entitlementsByUserType[userType].maxMessagesPerHour) {
+    if (messageCount > entitlementsByUserType[userType].maxMessagesPerHour) {
       logger.warn("chat.post.rejected", {
         chatId: id,
         durationMs: Date.now() - startedAt,
@@ -558,114 +367,13 @@ export async function POST(request: Request) {
       });
     }
 
-    let directMediaRecord: DirectMediaRecord | undefined;
-    let directMediaInputImage: string | undefined;
-    let directMediaInputVideo: string | undefined;
-    const imageSize = normalizeImageSize(selectedImageModel, selectedImageSize);
-    const videoQuality = normalizeVideoQuality(
-      selectedVideoModel,
-      selectedVideoQuality
-    );
-    if (
-      message?.role === "user" &&
-      (generationMode === "image" || generationMode === "video")
-    ) {
-      const prompt = message.parts
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("\n")
-        .trim();
-      const modelId =
-        generationMode === "image" ? selectedImageModel : selectedVideoModel;
-      const sourceImage = message.parts.find(
-        (
-          part
-        ): part is Extract<(typeof message.parts)[number], { type: "file" }> =>
-          part.type === "file" && part.mediaType.startsWith("image/")
-      );
-      const sourceVideo = message.parts.find(
-        (
-          part
-        ): part is Extract<(typeof message.parts)[number], { type: "file" }> =>
-          part.type === "file" && part.mediaType.startsWith("video/")
-      );
-
-      if (!prompt || !modelId) {
-        throw new ChatbotError("bad_request:api");
-      }
-      if (
-        (generationMode === "image" &&
-          (Boolean(sourceVideo) ||
-            (Boolean(sourceImage) && !supportsImageInput(modelId)))) ||
-        (generationMode === "video" &&
-          ((Boolean(sourceImage) && !supportsVideoImageInput(modelId)) ||
-            (Boolean(sourceVideo) && !supportsVideoFileInput(modelId))))
-      ) {
-        throw new ChatbotError("bad_request:api");
-      }
-
-      directMediaRecord = {
-        createdAt: new Date(),
-        input: {
-          model: modelId,
-          prompt,
-          ...(generationMode === "image" ? { size: imageSize } : {}),
-          ...(generationMode === "video" ? { quality: videoQuality } : {}),
-          ...(sourceImage ? { sourceImage: sourceImage.name } : {}),
-          ...(sourceVideo ? { sourceVideo: sourceVideo.name } : {}),
-        },
-        kind: generationMode,
-        messageId: generateUUID(),
-        modelId,
-        modelName:
-          generationMode === "video" ? videoStatusModelName(modelId) : modelId,
-        toolCallId: generateUUID(),
-      };
-
-      if (sourceImage) {
-        directMediaInputImage = await resolveMediaInputUrl({
-          mediaType: sourceImage.mediaType,
-          url: sourceImage.url,
-          userId: session.user.id,
-        });
-      }
-      if (sourceVideo) {
-        directMediaInputVideo = await resolveMediaInputUrl({
-          mediaType: sourceVideo.mediaType,
-          url: sourceVideo.url,
-          userId: session.user.id,
-        });
-      }
-
-      await saveMessages({
-        messages: [
-          {
-            attachments: [],
-            chatId: id,
-            createdAt: directMediaRecord.createdAt,
-            id: directMediaRecord.messageId,
-            parts: directMediaParts(directMediaRecord),
-            role: "assistant",
-          },
-        ],
-      });
-      logger.info("chat.media_mode.persisted", {
-        chatId: id,
-        kind: directMediaRecord.kind,
-        messageId: directMediaRecord.messageId,
-        model: directMediaRecord.modelId,
-      });
-    }
-
     const modelConfig = await getModelConfig(chatModel);
     const modelCapabilities = await getCapabilities();
     const capabilities = modelCapabilities[chatModel];
     const isReasoningModel = capabilities?.reasoning === true;
     const supportsTools = capabilities?.tools === true;
 
-    const modelMessages = await convertToModelMessages(
-      await hydrateOwnedMediaForModel(uiMessages, session.user.id)
-    );
+    const modelMessages = await convertToModelMessages(uiMessages);
 
     logger.info("chat.post.model_ready", {
       capability: capabilities,
@@ -679,242 +387,8 @@ export async function POST(request: Request) {
       userId: session.user.id,
     });
 
-    const stream = createUIMessageStream<ChatMessage>({
+    const stream = createUIMessageStream({
       execute: async ({ writer: dataStream }) => {
-        if (generationMode === "image" && message?.role === "user") {
-          if (directMediaRecord?.kind !== "image") {
-            throw new Error("Image request was not persisted");
-          }
-
-          const {
-            input: { prompt },
-            modelId,
-            toolCallId,
-          } = directMediaRecord;
-          const createdAt = directMediaRecord.createdAt.toISOString();
-          dataStream.write({
-            messageMetadata: {
-              createdAt,
-              model: modelId,
-              modelName: directMediaRecord.modelName,
-            },
-            type: "start",
-          });
-          dataStream.write({ type: "start-step" });
-          dataStream.write({
-            input: {
-              model: modelId,
-              prompt,
-              size: imageSize,
-            },
-            toolCallId,
-            toolName: "generateImage",
-            type: "tool-input-available",
-          });
-          dataStream.write({
-            data: {
-              message: "Generating image…",
-              modelId,
-              modelName: directMediaRecord.modelName,
-              phase: "waiting",
-            },
-            transient: true,
-            type: "data-waiting-status",
-          });
-
-          const output = await generateImageForChat({
-            preferredModel: modelId,
-            prompt,
-            session,
-            size: imageSize,
-            sourceImage: directMediaInputImage,
-          });
-          await updateMessage({
-            id: directMediaRecord.messageId,
-            parts: directMediaParts(
-              directMediaRecord,
-              output as Record<string, unknown>
-            ),
-          });
-          dataStream.write({
-            output,
-            toolCallId,
-            type: "tool-output-available",
-          });
-          dataStream.write({
-            messageMetadata: {
-              createdAt,
-              model: output.model,
-              modelName: output.modelName,
-            },
-            type: "message-metadata",
-          });
-          dataStream.write({ type: "finish-step" });
-          dataStream.write({
-            finishReason: "tool-calls",
-            messageMetadata: {
-              createdAt,
-              model: output.model,
-              modelName: output.modelName,
-            },
-            type: "finish",
-          });
-          logger.info("chat.image_mode.end", {
-            chatId: id,
-            durationMs: Date.now() - startedAt,
-            model: output.model,
-            success: !("error" in output),
-          });
-
-          if (titlePromise) {
-            try {
-              const title = await titlePromise;
-              dataStream.write({ data: title, type: "data-chat-title" });
-              updateChatTitleById({ chatId: id, title });
-            } catch {
-              /* non-fatal */
-            }
-          }
-          return;
-        }
-
-        if (generationMode === "video" && message?.role === "user") {
-          if (directMediaRecord?.kind !== "video") {
-            throw new Error("Video request was not persisted");
-          }
-
-          const {
-            input: { prompt },
-            modelId,
-            toolCallId,
-          } = directMediaRecord;
-          const createdAt = directMediaRecord.createdAt.toISOString();
-          dataStream.write({
-            messageMetadata: {
-              createdAt,
-              model: modelId,
-              modelName: directMediaRecord.modelName,
-            },
-            type: "start",
-          });
-          dataStream.write({ type: "start-step" });
-          dataStream.write({
-            input: {
-              model: modelId,
-              prompt,
-              quality: directMediaRecord.input.quality,
-              ...(directMediaRecord.input.sourceImage
-                ? { sourceImage: directMediaRecord.input.sourceImage }
-                : {}),
-              ...(directMediaRecord.input.sourceVideo
-                ? { sourceVideo: directMediaRecord.input.sourceVideo }
-                : {}),
-            },
-            toolCallId,
-            toolName: "generateVideo",
-            type: "tool-input-available",
-          });
-
-          const videoStartedAt = Date.now();
-          const videoModelName = videoStatusModelName(modelId);
-          let heartbeatCount = 0;
-          const writeVideoHeartbeat = () => {
-            heartbeatCount += 1;
-            const elapsedMinutes = Math.max(
-              1,
-              Math.floor((Date.now() - videoStartedAt) / 60_000)
-            );
-            dataStream.write({
-              data: {
-                message: `${videoModelName} is still generating (${elapsedMinutes} min)…`,
-                modelId,
-                modelName: videoModelName,
-                phase: "still-waiting",
-              },
-              transient: true,
-              type: "data-waiting-status",
-            });
-            if (heartbeatCount % 4 === 0) {
-              logger.info("chat.video_mode.heartbeat", {
-                chatId: id,
-                elapsedMs: Date.now() - videoStartedAt,
-                model: modelId,
-              });
-            }
-          };
-          dataStream.write({
-            data: {
-              message: `${videoModelName} accepted the request and is generating…`,
-              modelId,
-              modelName: videoModelName,
-              phase: "waiting",
-            },
-            transient: true,
-            type: "data-waiting-status",
-          });
-          const heartbeatTimer = setInterval(writeVideoHeartbeat, 15_000);
-          let output: Awaited<ReturnType<typeof generateVideo>>;
-          try {
-            output = await generateVideo({
-              inputImage: directMediaInputImage,
-              inputVideo: directMediaInputVideo,
-              preferredModel: modelId,
-              prompt,
-              quality: videoQuality,
-              session,
-            });
-          } finally {
-            clearInterval(heartbeatTimer);
-          }
-          await updateMessage({
-            id: directMediaRecord.messageId,
-            parts: directMediaParts(
-              directMediaRecord,
-              output as Record<string, unknown>
-            ),
-          });
-          dataStream.write({
-            output,
-            toolCallId,
-            type: "tool-output-available",
-          });
-          dataStream.write({
-            messageMetadata: {
-              createdAt,
-              model: output.model,
-              modelName: output.modelName,
-            },
-            type: "message-metadata",
-          });
-          dataStream.write({ type: "finish-step" });
-          dataStream.write({
-            finishReason: "tool-calls",
-            messageMetadata: {
-              createdAt,
-              model: output.model,
-              modelName: output.modelName,
-            },
-            type: "finish",
-          });
-          logger.info("chat.video_mode.end", {
-            chatId: id,
-            durationMs: Date.now() - startedAt,
-            model: output.model,
-            success: !("error" in output),
-          });
-
-          if (titlePromise) {
-            try {
-              const title = await titlePromise;
-              dataStream.write({ data: title, type: "data-chat-title" });
-              updateChatTitleById({ chatId: id, title });
-            } catch {
-              /* non-fatal */
-            }
-          }
-          return;
-        }
-
         const modelName = modelConfig?.name ?? chatModel;
         let hasModelActivity = false;
         let healthCheckTimer: ReturnType<typeof setTimeout> | undefined;
@@ -977,50 +451,20 @@ export async function POST(request: Request) {
           clearHealthCheckTimer();
         };
 
-        const tools: ToolSet = {
-          createDocument: createDocument({
-            dataStream,
-            modelId: chatModel,
-            session,
-          }),
-          delegateToAgentFramework: createAgentFrameworkTool(id),
-          editDocument: editDocument({ dataStream, session }),
-          generateImage: createGenerateImageTool(session),
-          generateVideo: createGenerateVideoTool(session, selectedVideoModel),
-          getWeather,
-          requestSuggestions: requestSuggestions({
-            dataStream,
-            modelId: chatModel,
-            session,
-          }),
-          updateDocument: updateDocument({
-            dataStream,
-            modelId: chatModel,
-            session,
-          }),
-          ...workspaceTools,
-          ...litellmMcpTools,
-        };
-
         const result = streamText({
-          activeTools: supportsTools
-            ? [
-                "getWeather",
-                "generateImage",
-                "createDocument",
-                "editDocument",
-                "updateDocument",
-                "requestSuggestions",
-                "delegateToAgentFramework",
-                ...(workspaceAccess ? workspaceToolNames : []),
-                ...(directMcpToolsEnabled ? litellmMcpToolNames : []),
-              ]
-            : [],
-          instructions: `${systemPrompt({ requestHints, supportsTools })}${
-            workspaceAccess
-              ? "\n\nYou have account-scoped workspace tools. The tool path creative/ maps to /home/blechdom/creative and nvidia/ maps to /home/blechdom/nvidia. Use workspaceList or workspaceRead before claiming local files are unavailable. To edit a file, read it, propose the complete replacement with workspaceProposePatch, show the returned diff to the user, then request workspaceApplyPatch approval. Use the Git tools for repositories under those roots; inspect status and diffs before commits, and request approval for every push."
-              : ""
-          }`,
+          activeTools:
+            isReasoningModel && !supportsTools
+              ? []
+              : [
+                  "getWeather",
+                  "createDocument",
+                  "editDocument",
+                  "updateDocument",
+                  "requestSuggestions",
+                  "delegateToAgentFramework",
+                  ...litellmMcpToolNames,
+                ],
+          instructions: systemPrompt({ requestHints, supportsTools }),
           messages: modelMessages,
           model: getLanguageModel(chatModel),
           onAbort() {
@@ -1067,29 +511,36 @@ export async function POST(request: Request) {
               openai: { reasoningEffort: modelConfig.reasoningEffort },
             }),
           },
-          stopWhen: [
-            isStepCount(5),
-            // Video generation is a complete terminal action. Stopping after
-            // its result prevents a chat model from retrying an expensive job
-            // or silently substituting an image when video generation fails.
-            hasToolCall("generateVideo"),
-            ...(directMcpToolsEnabled
-              ? [hasToolCall(...litellmMcpToolNames)]
-              : []),
-          ],
+          stopWhen: [isStepCount(5), hasToolCall(...litellmMcpToolNames)],
           telemetry: {
             functionId: "stream-text",
             isEnabled: isProductionEnvironment,
           },
-          tools,
+          tools: {
+            createDocument: createDocument({
+              dataStream,
+              modelId: chatModel,
+              session,
+            }),
+            editDocument: editDocument({ dataStream, session }),
+            getWeather,
+            requestSuggestions: requestSuggestions({
+              dataStream,
+              modelId: chatModel,
+              session,
+            }),
+            updateDocument: updateDocument({
+              dataStream,
+              modelId: chatModel,
+              session,
+            }),
+            delegateToAgentFramework: createAgentFrameworkTool(id),
+            ...litellmMcpTools,
+          },
         });
 
         dataStream.merge(
           toUIMessageStream({
-            messageMetadata: createMessageMetadataHandler({
-              modelId: chatModel,
-              modelName,
-            }),
             sendReasoning: isReasoningModel,
             stream: result.stream,
           })
@@ -1105,19 +556,13 @@ export async function POST(request: Request) {
           }
         }
       },
-      generateId: directMediaRecord
-        ? () => directMediaRecord.messageId
-        : generateUUID,
+      generateId: generateUUID,
       onEnd: async ({ messages: finishedMessages }) => {
         logger.info("chat.response.end", {
           chatId: id,
           durationMs: Date.now() - startedAt,
           messageCount: finishedMessages.length,
         });
-
-        if (directMediaRecord) {
-          return;
-        }
 
         if (isToolApprovalFlow) {
           await Promise.all(
@@ -1128,7 +573,7 @@ export async function POST(request: Request) {
               if (existingMsg) {
                 await updateMessage({
                   id: finishedMsg.id,
-                  parts: persistMessageParts(finishedMsg),
+                  parts: finishedMsg.parts,
                 });
                 return;
               }
@@ -1140,7 +585,7 @@ export async function POST(request: Request) {
                     chatId: id,
                     createdAt: new Date(),
                     id: finishedMsg.id,
-                    parts: persistMessageParts(finishedMsg),
+                    parts: finishedMsg.parts,
                     role: finishedMsg.role,
                   },
                 ],
@@ -1154,7 +599,7 @@ export async function POST(request: Request) {
               chatId: id,
               createdAt: new Date(),
               id: currentMessage.id,
-              parts: persistMessageParts(currentMessage),
+              parts: currentMessage.parts,
               role: currentMessage.role,
             })),
           });
@@ -1183,10 +628,6 @@ export async function POST(request: Request) {
     return createUIMessageStreamResponse({
       async consumeSseStream({ stream: sseStream }) {
         if (!process.env.REDIS_URL) {
-          // Keep a second consumer alive so an expensive tool call can finish
-          // and createUIMessageStream.onEnd can persist its result even when
-          // the browser navigates away or refreshes during generation.
-          await sseStream.pipeTo(new WritableStream());
           return;
         }
         try {
@@ -1198,17 +639,9 @@ export async function POST(request: Request) {
               streamId,
               () => sseStream
             );
-            return;
           }
-          await sseStream.pipeTo(new WritableStream());
-        } catch (error) {
-          logger.warn("chat.stream.persistence_consumer_error", {
-            chatId: id,
-            error,
-          });
-          if (!sseStream.locked) {
-            await sseStream.pipeTo(new WritableStream());
-          }
+        } catch {
+          /* non-critical */
         }
       },
       stream,
@@ -1260,23 +693,6 @@ export async function DELETE(request: Request) {
 
   if (chat?.userId !== session.user.id) {
     return new ChatbotError("forbidden:chat").toResponse();
-  }
-
-  const messages = await getMessagesByChatId({ id });
-  if (hasPendingDirectMedia(messages)) {
-    logger.warn("chat.delete.rejected", {
-      chatId: id,
-      reason: "media-generation-active",
-      userId: session.user.id,
-    });
-    return Response.json(
-      {
-        code: "bad_request:chat",
-        message:
-          "This chat has media still generating. Wait for it to finish before deleting it.",
-      },
-      { status: 409 }
-    );
   }
 
   const deletedChat = await deleteChatById({ id });
