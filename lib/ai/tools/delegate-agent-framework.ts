@@ -50,12 +50,14 @@ export function createAgentFrameworkTool(sessionId: string) {
   return tool({
     description:
       "Delegate complex model-broker, MCP, stack-diagnostics, or multiagent work to the Microsoft Agent Framework harness. Use direct tools for simple single operations.",
+    execute: async ({ request }) => callAgentFramework(request, sessionId),
     inputSchema: z.object({
       request: z
         .string()
         .min(1)
-        .describe("A complete, self-contained request for the multiagent harness."),
+        .describe(
+          "A complete, self-contained request for the multiagent harness."
+        ),
     }),
-    execute: async ({ request }) => callAgentFramework(request, sessionId),
   });
 }

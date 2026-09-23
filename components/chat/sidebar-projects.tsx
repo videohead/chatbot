@@ -1,16 +1,16 @@
 "use client";
 
 import {
-  Box,
-  Brain,
   Bot,
+  Brain,
   Cpu,
   Film,
   GitBranch,
   Layers,
-  Network,
   type LucideIcon,
+  Network,
 } from "lucide-react";
+import { useCallback } from "react";
 import {
   SidebarGroup,
   SidebarGroupContent,
@@ -22,23 +22,32 @@ import {
 } from "@/components/ui/sidebar";
 
 type Project = {
-  name: string;
-  href: string;
   icon: LucideIcon;
+  name: string;
+  path: string;
 };
 
+const serviceOrigin = (
+  process.env.NEXT_PUBLIC_SERVICE_ORIGIN ?? "https://videohead.duckdns.org"
+).replace(/\/$/, "");
+
 const projects: Project[] = [
-  { name: "WorldGraphStudio", href: "/worldgraphstudio", icon: GitBranch },
-  { name: "ComfyUI", href: "/comfy", icon: Layers },
-  { name: "Morphazoid", href: "/morphazoid/", icon: Brain },
-  { name: "VideoBrain", href: "/videobrain", icon: Film },
-  { name: "vLLM", href: "/vllm", icon: Cpu },
-  { name: "Agent Framework", href: "/agent-framework", icon: Bot },
-  { name: "LiteLLM", href: "/litellm", icon: Network },
+  { icon: GitBranch, name: "WorldGraphStudio", path: "/worldgraphstudio/" },
+  { icon: Layers, name: "ComfyUI", path: "/comfy/" },
+  { icon: Brain, name: "Morphazoid", path: "/morphazoid/" },
+  { icon: Film, name: "VideoBrain", path: "/videobrain/" },
+  { icon: Cpu, name: "vLLM", path: "/vllm/v1/models" },
+  { icon: Bot, name: "Agent Framework", path: "/agent-framework" },
+  {
+    icon: Network,
+    name: "LiteLLM",
+    path: "/litellm/health/liveliness",
+  },
 ];
 
 export function SidebarProjects() {
   const { setOpenMobile } = useSidebar();
+  const closeMobile = useCallback(() => setOpenMobile(false), [setOpenMobile]);
 
   return (
     <SidebarGroup className="group-data-[collapsible=icon]:hidden">
@@ -54,10 +63,10 @@ export function SidebarProjects() {
                 className="h-8 rounded-lg text-[13px] text-sidebar-foreground/50 transition-colors duration-150 hover:bg-sidebar-accent hover:text-sidebar-foreground"
               >
                 <a
-                  href={project.href}
-                  target="_blank"
+                  href={`${serviceOrigin}${project.path}`}
+                  onClick={closeMobile}
                   rel="noopener noreferrer"
-                  onClick={() => setOpenMobile(false)}
+                  target="_blank"
                 >
                   <project.icon className="size-4" />
                   <span className="truncate">{project.name}</span>
