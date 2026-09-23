@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/chatbot/ops/lib.sh
+require_docker
+require_root
+ensure_runtime_dirs
+acquire_operation_lock
+
+[[ -z "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" status --porcelain --untracked-files=all)" ]] \
+  || die "the source checkout is dirty; preserve and commit collaborator work before building"
+[[ -s "$CHATBOT_ROOT/model-catalog.json" ]] \
+  || die "model-catalog.json is missing; generate and validate the metadata catalog first"
+
+base_release=$CHATBOT_CURRENT_RELEASE
+[[ -f "$base_release" ]] || die "canonical deployment is not initialized"
+load_release_file "$base_release"
+
+commit=$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)
+catalog_sha256=$(sha256sum "$CHATBOT_ROOT/model-catalog.json" | cut -d' ' -f1)
+short_commit=${commit:0:12}
+release_id="$(date -u +%Y%m%dT%H%M%SZ)-$short_commit"
+release_file="$CHATBOT_RUNTIME/releases/$release_id.env"
+build_root="$CHATBOT_RUNTIME/build/$release_id"
+build_context="$build_root/source"
+compose_snapshot="$CHATBOT_RUNTIME/releases/$release_id.compose.yaml"
+test_compose_snapshot="$CHATBOT_RUNTIME/releases/$release_id.compose.test.yaml"
+policy_snapshot="$CHATBOT_RUNTIME/releases/$release_id.workspace-policy.json"
+release_manifest="$CHATBOT_RUNTIME/releases/$release_id.manifest"
+build_complete=false
+
+install -d -o root -g optusers -m 0750 "$build_context"
+cleanup_build_context() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [[ "$build_complete" == false ]]; then
+    docker image rm \
+      "local/chatbot-web:$release_id" \
+      "local/chatbot-media:$release_id" \
+      "local/chatbot-workspace:$release_id" >/dev/null 2>&1 || true
+    rm -f -- "$release_file" || true
+    rm -f -- "$release_manifest" || true
+    rm -f -- "$compose_snapshot" "$test_compose_snapshot" "$policy_snapshot" || true
+  fi
+  [[ ! -d "$build_root" ]] || rm -rf --one-file-system -- "$build_root"
+  exit "$status"
+}
+trap cleanup_build_context EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" archive "$commit" \
+  | tar -x -C "$build_context"
+install -o root -g optusers -m 0640 "$CHATBOT_ROOT/model-catalog.json" \
+  "$build_context/model-catalog.json"
+
+cat >"$release_file" <<EOF
+CHATBOT_RELEASE_ID=$release_id
+CHATBOT_WEB_IMAGE=local/chatbot-web:$release_id
+CHATBOT_MEDIA_IMAGE=local/chatbot-media:$release_id
+CHATBOT_MEDIA_BASE_IMAGE=$CHATBOT_MEDIA_BASE_IMAGE
+CHATBOT_WORKSPACE_IMAGE=local/chatbot-workspace:$release_id
+EOF
+chown root:optusers "$release_file"
+chmod 0640 "$release_file"
+validate_release_file "$release_file"
+snapshot_release_configuration "$release_file"
+
+CHATBOT_PROJECT_NAME=chatbot-build \
+CHATBOT_BUILD_CONTEXT="$build_context" \
+CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
+  docker compose --env-file "$release_file" -f "$compose_snapshot" \
+    build web media workspace
+
+[[ "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)" == "$commit" ]] \
+  || die "source commit changed during the build"
+[[ -z "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" status --porcelain --untracked-files=all)" ]] \
+  || die "source checkout changed during the build"
+[[ "$(sha256sum "$CHATBOT_ROOT/model-catalog.json" | cut -d' ' -f1)" == "$catalog_sha256" ]] \
+  || die "model catalog changed during the build"
+write_release_manifest "$release_file" "$commit" "$catalog_sha256"
+# A newly built pending release invalidates approval of an older candidate.
+rm -f -- "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"
+atomic_copy "$release_file" "$CHATBOT_PENDING_RELEASE"
+build_complete=true
+
+trap - EXIT INT TERM
+rm -rf --one-file-system -- "$build_root"
+
+printf 'Built immutable release %s.\nNext: sudo /opt/chatbot/ops/candidate\n' "$release_id"

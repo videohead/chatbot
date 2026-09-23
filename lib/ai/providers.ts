@@ -8,7 +8,7 @@ const LITELLM_BASE_URL =
 const LITELLM_API_KEY = process.env.LITELLM_API_KEY ?? "not-needed";
 const MEDIA_LITELLM_BASE_URL =
   process.env.MEDIA_LITELLM_BASE_URL ??
-  "http://media-litellm-candidate:4000/v1";
+  "http://media:4000/v1";
 const MEDIA_LITELLM_API_KEY =
   process.env.MEDIA_LITELLM_MASTER_KEY ?? "not-configured";
 const LITELLM_MCP_SERVER = process.env.LITELLM_MCP_SERVER ?? "metis_router";

@@ -1,0 +1,548 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+set +x
+source /opt/chatbot/ops/lib.sh
+require_docker
+require_root
+ensure_runtime_dirs
+acquire_operation_lock
+
+readonly action=${1:-}
+readonly migration_file="$CHATBOT_RUNTIME/migration.env"
+readonly lock_file="$CHATBOT_RUNTIME/migration.lock"
+readonly dynamic_file=/opt/traefik/dynamic.yml
+readonly legacy_web=chatbot
+readonly legacy_media=media-litellm-candidate
+readonly legacy_workspace=chatbot-workspace-blechdom
+
+exec 9>"$lock_file"
+flock -n 9 || die "another chatbot migration operation is running"
+
+write_phase() {
+  local phase=$1 tmp="${migration_file}.tmp.$$"
+  awk -v phase="$phase" '
+    BEGIN { changed=0 }
+    /^MIGRATION_PHASE=/ { print "MIGRATION_PHASE=" phase; changed=1; next }
+    { print }
+    END { if (!changed) print "MIGRATION_PHASE=" phase }
+  ' "$migration_file" >"$tmp"
+  chown root:optusers "$tmp"
+  chmod 0640 "$tmp"
+  mv -T -- "$tmp" "$migration_file"
+}
+
+copy_logs() {
+  local container=$1 source
+  source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/logs"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
+  [[ -n "$source" && -d "$source" ]] || return 0
+  cp -a --no-clobber "$source/." "$CHATBOT_ROOT/logs/"
+  chown -R 1000:optusers "$CHATBOT_ROOT/logs"
+  find "$CHATBOT_ROOT/logs" -type d -exec chmod 2770 {} +
+  find "$CHATBOT_ROOT/logs" -type f -exec chmod 0660 {} +
+}
+
+validate_workspace_state_tree() {
+  local directory=$1
+  [[ -d "$directory" && ! -L "$directory" ]] || return 1
+  ! find "$directory" -xdev -type l -print -quit | grep -q . || return 1
+  ! find "$directory" -xdev ! -type d ! -type f -print -quit | grep -q . || return 1
+  [[ -f "$directory/state.sqlite" && ! -L "$directory/state.sqlite" ]] || return 1
+  [[ "$(sqlite3 "$directory/state.sqlite" 'PRAGMA quick_check;' 2>/dev/null)" == ok ]] || return 1
+}
+
+sync_workspace_state_offline() {
+  local source=$1 destination=$2 parent stage backup failed_copy swapped=false
+  [[ -d "$source" && ! -L "$source" ]] || return 1
+  parent=$(dirname "$destination")
+  [[ -d "$parent" && ! -L "$parent" ]] || return 1
+  stage="${destination}.stage.${MIGRATION_ID}.$$"
+  backup="${destination}.before-${MIGRATION_ID}-$(date -u +%Y%m%dT%H%M%SZ)"
+  failed_copy="${destination}.failed-${MIGRATION_ID}-$(date -u +%Y%m%dT%H%M%SZ)"
+  [[ ! -e "$stage" && ! -e "$backup" && ! -e "$failed_copy" ]] || return 1
+  if ! install -d -o 1000 -g 1000 -m 0700 "$stage"; then
+    return 1
+  fi
+  if ! rsync -a --delete --numeric-ids -- "$source/" "$stage/"; then
+    rm -rf --one-file-system -- "$stage"
+    return 1
+  fi
+  if ! rm -f -- "$stage/service.lock"; then
+    rm -rf --one-file-system -- "$stage"
+    return 1
+  fi
+  if ! validate_workspace_state_tree "$stage"; then
+    rm -rf --one-file-system -- "$stage"
+    return 1
+  fi
+  if ! chown -R 1000:1000 "$stage" \
+    || ! find "$stage" -xdev -type d -exec chmod 0700 {} + \
+    || ! find "$stage" -xdev -type f -exec chmod 0600 {} +; then
+    rm -rf --one-file-system -- "$stage"
+    return 1
+  fi
+
+  if [[ -e "$destination" ]]; then
+    if ! mv -T -- "$destination" "$backup"; then
+      rm -rf --one-file-system -- "$stage"
+      return 1
+    fi
+    swapped=true
+  fi
+  if ! mv -T -- "$stage" "$destination"; then
+    if [[ "$swapped" == true ]] && ! mv -T -- "$backup" "$destination"; then
+      printf 'URGENT: workspace-state swap and restoration both failed; retained path: %s\n' "$backup" >&2
+    fi
+    [[ ! -e "$stage" ]] || rm -rf --one-file-system -- "$stage"
+    return 1
+  fi
+  if ! python3 -I - "$parent" <<'PY'
+import os
+import sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    if mv -T -- "$destination" "$failed_copy"; then
+      if [[ "$swapped" == true ]]; then
+        mv -T -- "$backup" "$destination" \
+          || printf 'URGENT: parent fsync and workspace-state restoration failed; retained path: %s\n' "$backup" >&2
+      fi
+    else
+      printf 'URGENT: parent fsync failed and the new workspace state could not be retained separately.\n' >&2
+    fi
+    return 1
+  fi
+  if [[ "$swapped" == true ]]; then
+    printf 'Retained preceding workspace state: %s\n' "$backup" || true
+  fi
+  return 0
+}
+
+normalize_source_ownership() {
+  id videohead >/dev/null 2>&1 || die "videohead project owner is unavailable"
+  getent group optusers >/dev/null || die "optusers group is unavailable"
+  chown videohead:optusers "$CHATBOT_ROOT"
+  while IFS= read -r -d '' path; do
+    [[ -e "$CHATBOT_ROOT/$path" || -L "$CHATBOT_ROOT/$path" ]] || continue
+    chown -h videohead:optusers "$CHATBOT_ROOT/$path"
+  done < <(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" \
+    ls-files -z --cached --others --exclude-standard)
+  find "$CHATBOT_ROOT" -xdev \
+    \( -path "$CHATBOT_RUNTIME" -o -path "$CHATBOT_ROOT/logs" \
+       -o -path "$CHATBOT_ROOT/generated-media" -o -path "$CHATBOT_ROOT/.next" \
+       -o -path "$CHATBOT_ROOT/node_modules" -o -path "$CHATBOT_ROOT/playwright-report" \) -prune \
+    -o -type d -exec chown videohead:optusers {} + \
+    -exec chmod g+rws {} +
+}
+
+restore_legacy() {
+  if ! live_compose "$MIGRATION_RELEASE_FILE" down >/dev/null; then
+    printf 'Canonical Compose project could not be stopped before workspace-state recovery.\n' >&2
+    return 1
+  fi
+  if docker ps -q \
+      --filter label=com.docker.compose.project=chatbot \
+      --filter label=com.docker.compose.service=workspace | grep -q .; then
+    printf 'Canonical workspace is still running; refusing to copy its live SQLite state.\n' >&2
+    return 1
+  fi
+  local state_sync_ok=true
+  if [[ ${workspace_state_transferred:-true} == true ]] \
+    && ! sync_workspace_state_offline "$CHATBOT_RUNTIME/workspace" "$LEGACY_WORKSPACE_STATE"; then
+    state_sync_ok=false
+    printf '%s\n' \
+      'URGENT: canonical workspace state could not be copied back safely.' \
+      'The legacy service will be restored with its preceding state; retain both state directories for reconciliation.' >&2
+  fi
+  local record backup original expected actual
+  for record in \
+    "$LEGACY_MEDIA_BACKUP|$legacy_media|$LEGACY_MEDIA_ID" \
+    "$LEGACY_WORKSPACE_BACKUP|$legacy_workspace|$LEGACY_WORKSPACE_ID" \
+    "$LEGACY_WEB_BACKUP|$legacy_web|$LEGACY_WEB_ID"; do
+    IFS='|' read -r backup original expected <<<"$record"
+    if docker inspect "$original" >/dev/null 2>&1; then
+      actual=$(docker inspect --format '{{.Id}}' "$original")
+      [[ "$actual" == "$expected" ]] \
+        || { printf 'Unexpected container owns legacy name %s.\n' "$original" >&2; return 1; }
+      continue
+    fi
+    actual=$(docker inspect --format '{{.Id}}' "$backup" 2>/dev/null || true)
+    [[ "$actual" == "$expected" ]] \
+      || { printf 'Exact rollback container is unavailable: %s.\n' "$backup" >&2; return 1; }
+    if ! docker rename "$backup" "$original" >/dev/null; then
+      printf 'Could not restore legacy container name %s.\n' "$original" >&2
+      return 1
+    fi
+  done
+  if ! docker update --restart="$LEGACY_MEDIA_RESTART" "$legacy_media" >/dev/null \
+    || ! docker update --restart="$LEGACY_WORKSPACE_RESTART" "$legacy_workspace" >/dev/null \
+    || ! docker update --restart="$LEGACY_WEB_RESTART" "$legacy_web" >/dev/null; then
+    printf 'Could not restore one or more legacy restart policies.\n' >&2
+    return 1
+  fi
+  if ! docker start "$legacy_media" "$legacy_workspace" >/dev/null \
+    || ! docker start "$legacy_web" >/dev/null; then
+    printf 'Could not start one or more exact legacy containers.\n' >&2
+    return 1
+  fi
+
+  local attempt state all_ready
+  for ((attempt=1; attempt<=90; attempt++)); do
+    all_ready=true
+    for original in "$legacy_media" "$legacy_workspace" "$legacy_web"; do
+      state=$(container_health "$original")
+      [[ "$state" == 'running healthy' || "$state" == 'running ' ]] || all_ready=false
+    done
+    [[ "$all_ready" == true ]] && break
+    sleep 2
+  done
+  [[ "$all_ready" == true ]] || { printf 'Legacy containers did not return healthy.\n' >&2; return 1; }
+  [[ "$(docker port "$legacy_web" 3000/tcp 2>/dev/null || true)" == 127.0.0.1:3000 ]] \
+    || { printf 'Legacy web did not recover port 3000.\n' >&2; return 1; }
+  wait_for_url http://127.0.0.1:3000/login 60 \
+    || { printf 'Legacy login endpoint did not recover.\n' >&2; return 1; }
+  [[ "$state_sync_ok" == true ]] || return 1
+}
+
+discard_incomplete_prepare() {
+  local release_file=${MIGRATION_RELEASE_FILE:-} manifest= compose_snapshot= test_snapshot= policy_snapshot=
+  if [[ -n "$release_file" && -f "$release_file" ]]; then
+    manifest=$(release_manifest_path "$release_file")
+    compose_snapshot=$(release_compose_path "$release_file")
+    test_snapshot=$(release_test_compose_path "$release_file")
+    policy_snapshot=$(release_policy_path "$release_file")
+    if [[ -f "$compose_snapshot" && -f "$test_snapshot" && -f "$policy_snapshot" ]]; then
+      test_compose "$release_file" down --remove-orphans >/dev/null 2>&1 || true
+    fi
+    load_release_file "$release_file"
+    docker image rm "$CHATBOT_WEB_IMAGE" "$CHATBOT_MEDIA_IMAGE" \
+      "$CHATBOT_MEDIA_BASE_IMAGE" "$CHATBOT_WORKSPACE_IMAGE" >/dev/null 2>&1 || true
+    rm -f -- "$release_file" "$manifest" "$compose_snapshot" "$test_snapshot" "$policy_snapshot"
+  fi
+  for path in "$migration_file" "$CHATBOT_PENDING_RELEASE" \
+    "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"; do
+    [[ ! -e "$path" ]] || rm -- "$path"
+  done
+}
+
+prepare() {
+  if [[ -f "$migration_file" ]]; then
+    load_migration_file
+    case "$MIGRATION_PHASE" in
+      prepared)
+        /opt/chatbot/ops/candidate "$MIGRATION_RELEASE_FILE"
+        printf '%s\n' 'A canonical candidate is already prepared.' \
+          'Test http://localhost:15008, then run: sudo /opt/chatbot/ops/migrate-legacy promote'
+        return
+        ;;
+      preparing)
+        printf 'Removing an incomplete earlier candidate preparation before retrying.\n'
+        discard_incomplete_prepare
+        ;;
+      rolled-back)
+        for container in "$legacy_web" "$legacy_media" "$legacy_workspace"; do
+          [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)" == running ]] \
+            || die "required restored legacy container is not running: $container"
+        done
+        /opt/chatbot/ops/candidate "$MIGRATION_RELEASE_FILE"
+        write_phase prepared
+        printf '%s\n' \
+          'The canonical candidate was recreated after rollback.' \
+          'Test http://localhost:15008, then run: sudo /opt/chatbot/ops/migrate-legacy promote'
+        return
+        ;;
+      promoted|retired) die "the canonical migration has already been promoted" ;;
+      *) die "existing migration record is in phase $MIGRATION_PHASE" ;;
+    esac
+  fi
+
+  local container legacy_project legacy_service workspace_path
+  for container in "$legacy_web" "$legacy_media" "$legacy_workspace"; do
+    [[ "$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null || true)" == running ]] \
+      || die "required live legacy container is not running: $container"
+    legacy_project=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$container" 2>/dev/null || true)
+    legacy_service=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$container" 2>/dev/null || true)
+    if [[ "$legacy_project" == chatbot && "$legacy_service" =~ ^(web|media|workspace)$ ]]; then
+      die "legacy container would collide with canonical Compose identity: $container"
+    fi
+  done
+  [[ "$(docker port "$legacy_web" 3000/tcp 2>/dev/null || true)" == 127.0.0.1:3000 ]] \
+    || die "legacy web container does not own 127.0.0.1:3000"
+  [[ -f "$dynamic_file" ]] || die "Traefik dynamic configuration is missing"
+  grep -q 'http://127.0.0.1:3000' "$dynamic_file" \
+    || die "Traefik no longer targets the stable chatbot port"
+  for workspace_path in /home/blechdom/creative /home/blechdom/nvidia; do
+    [[ -d "$workspace_path" && ! -L "$workspace_path" ]] \
+      || die "approved workspace path is missing or is a symlink: $workspace_path"
+    [[ "$(stat -c '%u' "$workspace_path")" == 1000 ]] \
+      || die "approved workspace path is not owned by blechdom: $workspace_path"
+  done
+
+  local safety_ref=refs/heads/preserve/collaborator-wip-2026-09-23
+  local review_ref=refs/heads/review/canonical-compose-cleanup-2026-09-23
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" show-ref --verify --quiet "$safety_ref" \
+    || die "collaborator safety branch is missing"
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" show-ref --verify --quiet "$review_ref" \
+    || die "canonical cleanup review branch is missing"
+  python3 -I - "$CHATBOT_ROOT" "$safety_ref" <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1])
+ref = sys.argv[2]
+paths = (
+    '.env.example',
+    'README.md',
+    'app/(chat)/api/chat/route.ts',
+    'components/chat/app-sidebar.tsx',
+    'components/chat/sidebar-projects.tsx',
+    'lib/ai/prompts.ts',
+    'lib/ai/tools/delegate-agent-framework.ts',
+)
+for path in paths:
+    saved = subprocess.run(
+        ['git', '-c', f'safe.directory={root}', '-C', str(root), 'show', f'{ref}:{path}'],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    if saved != (root / path).read_bytes():
+        raise SystemExit(f'Collaborator file changed after preservation: {path}')
+PY
+  install -d -o root -g optusers -m 2770 /var/backups/chatbot
+  local bundle=/var/backups/chatbot/canonical-compose-review-2026-09-23.bundle
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" bundle create \
+    "$bundle" "$safety_ref" "$review_ref"
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" bundle verify "$bundle" >/dev/null
+  chown root:optusers "$bundle"
+  chmod 0640 "$bundle"
+  normalize_source_ownership
+
+  for secret in auth-secret postgres-password litellm-client.key media-litellm-master.key; do
+    [[ -s "/etc/chatbot/secrets/$secret" ]] || die "required chatbot secret is missing: $secret"
+  done
+  [[ -s /opt/provider-keys/api.key && -s /opt/provider-keys/hub.key ]] \
+    || die "current NVIDIA provider key files are unavailable"
+  for secret in token github.token gitlab.token; do
+    [[ -s "/home/blechdom/.config/chatbot-workspace/$secret" ]] \
+      || die "current workspace secret is unavailable: $secret"
+  done
+  python3 -I - <<'PY'
+import json
+from pathlib import Path
+current=json.loads(Path('/home/blechdom/.config/chatbot-workspace/policy.json').read_text())
+canonical=json.loads(Path('/opt/chatbot/config/workspace-policy.json').read_text())
+if current != canonical:
+    raise SystemExit('Canonical workspace policy differs from the active policy; reconcile it before migration')
+PY
+
+  install -d -o 0 -g 0 -m 0700 /etc/chatbot/secrets/provider
+  install -d -o 0 -g 0 -m 0700 /etc/chatbot/secrets/workspace
+  install -o 0 -g 0 -m 0400 /opt/provider-keys/api.key \
+    /etc/chatbot/secrets/provider/nvidia-inference-api.key
+  install -o 0 -g 0 -m 0400 /opt/provider-keys/hub.key \
+    /etc/chatbot/secrets/provider/nvidia-hub.key
+  install -o 1000 -g 1000 -m 0400 /home/blechdom/.config/chatbot-workspace/token \
+    /etc/chatbot/secrets/workspace/token
+  install -o 1000 -g 1000 -m 0400 /opt/chatbot/config/workspace-policy.json \
+    /etc/chatbot/secrets/workspace/policy.json
+  install -o 1000 -g 1000 -m 0400 /home/blechdom/.config/chatbot-workspace/github.token \
+    /etc/chatbot/secrets/workspace/github.token
+  install -o 1000 -g 1000 -m 0400 /home/blechdom/.config/chatbot-workspace/gitlab.token \
+    /etc/chatbot/secrets/workspace/gitlab.token
+
+  copy_logs "$legacy_web"
+  local migration_id slug release_file web_id media_id workspace_id media_base
+  local legacy_web_id legacy_media_id legacy_workspace_id
+  local legacy_web_restart legacy_media_restart legacy_workspace_restart
+  local legacy_workspace_state traefik_sha
+  migration_id="$(date -u +%Y%m%dT%H%M%SZ)"
+  slug=$(printf '%s' "$migration_id" | tr '[:upper:]' '[:lower:]')
+  release_file="$CHATBOT_RUNTIME/releases/legacy-$slug.env"
+  web_id=$(docker inspect --format '{{.Image}}' "$legacy_web")
+  media_id=$(docker inspect --format '{{.Image}}' "$legacy_media")
+  workspace_id=$(docker inspect --format '{{.Image}}' "$legacy_workspace")
+  legacy_web_id=$(docker inspect --format '{{.Id}}' "$legacy_web")
+  legacy_media_id=$(docker inspect --format '{{.Id}}' "$legacy_media")
+  legacy_workspace_id=$(docker inspect --format '{{.Id}}' "$legacy_workspace")
+  legacy_web_restart=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$legacy_web")
+  legacy_media_restart=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$legacy_media")
+  legacy_workspace_restart=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$legacy_workspace")
+  legacy_workspace_state=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$legacy_workspace")
+  [[ -n "$legacy_workspace_state" && "$(printf '%s\n' "$legacy_workspace_state" | wc -l)" == 1 ]] \
+    || die "legacy workspace must have exactly one /data mount"
+  [[ "$legacy_workspace_state" == /home/blechdom/.config/chatbot-workspace/data ]] \
+    || die "legacy workspace state mount is not the expected private directory"
+  [[ -d "$legacy_workspace_state" && ! -L "$legacy_workspace_state" ]] \
+    || die "legacy workspace state directory is unavailable"
+  [[ "$(stat -c '%u:%a' "$legacy_workspace_state")" == 1000:700 ]] \
+    || die "legacy workspace state ownership or mode is unsafe"
+  validate_workspace_state_tree "$legacy_workspace_state" \
+    || die "legacy workspace state failed structural or SQLite validation"
+  traefik_sha=$(sha256sum "$dynamic_file" | cut -d' ' -f1)
+  media_base="local/chatbot-media-base:legacy-$slug"
+
+  cat >"$release_file" <<EOF
+CHATBOT_RELEASE_ID=legacy-$slug
+CHATBOT_WEB_IMAGE=local/chatbot-web:legacy-$slug
+CHATBOT_MEDIA_IMAGE=local/chatbot-media:legacy-$slug
+CHATBOT_MEDIA_BASE_IMAGE=$media_base
+CHATBOT_WORKSPACE_IMAGE=local/chatbot-workspace:legacy-$slug
+EOF
+  chown root:optusers "$release_file"
+  chmod 0640 "$release_file"
+  validate_release_file "$release_file"
+
+  cat >"$migration_file" <<EOF
+MIGRATION_PHASE=preparing
+MIGRATION_ID=$slug
+MIGRATION_RELEASE_FILE=$release_file
+LEGACY_WEB_ID=$legacy_web_id
+LEGACY_WEB_BACKUP=chatbot-legacy-web-$slug
+LEGACY_WEB_RESTART=${legacy_web_restart:-no}
+LEGACY_MEDIA_ID=$legacy_media_id
+LEGACY_MEDIA_BACKUP=chatbot-legacy-media-$slug
+LEGACY_MEDIA_RESTART=${legacy_media_restart:-no}
+LEGACY_WORKSPACE_ID=$legacy_workspace_id
+LEGACY_WORKSPACE_BACKUP=chatbot-legacy-workspace-$slug
+LEGACY_WORKSPACE_RESTART=${legacy_workspace_restart:-no}
+LEGACY_WORKSPACE_STATE=$legacy_workspace_state
+TRAEFIK_SHA256=$traefik_sha
+EOF
+  chown root:optusers "$migration_file"
+  chmod 0640 "$migration_file"
+  load_migration_file
+
+  local prepare_complete=false
+  recover_prepare_failure() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ "$prepare_complete" == false ]]; then
+      discard_incomplete_prepare
+    fi
+    exit "$status"
+  }
+  trap recover_prepare_failure EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  snapshot_release_configuration "$release_file"
+  docker image tag "$web_id" "local/chatbot-web:legacy-$slug"
+  docker image tag "$media_id" "$media_base"
+  docker image tag "$workspace_id" "local/chatbot-workspace:legacy-$slug"
+  CHATBOT_PROJECT_NAME=chatbot-build \
+  CHATBOT_BUILD_CONTEXT="$CHATBOT_ROOT" \
+  CHATBOT_WORKSPACE_BUILD_CONTEXT="$CHATBOT_ROOT/services/workspace" \
+    docker compose --env-file "$release_file" \
+      -f "$(release_compose_path "$release_file")" build media
+  write_release_manifest "$release_file" legacy legacy
+  rm -f -- "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"
+  atomic_copy "$release_file" "$CHATBOT_PENDING_RELEASE"
+  /opt/chatbot/ops/candidate "$release_file"
+  write_phase prepared
+  prepare_complete=true
+  trap - EXIT INT TERM
+  printf '%s\n' \
+    'Canonical candidate preparation completed without changing the public service.' \
+    'The candidate shares chat history and generated media; workspace paths are isolated.' \
+    'Test http://localhost:15008, then run:' \
+    '  sudo /opt/chatbot/ops/migrate-legacy promote'
+}
+
+promote() {
+  load_migration_file
+  [[ "$MIGRATION_PHASE" == prepared ]] || die "migration phase is $MIGRATION_PHASE, expected prepared"
+  validate_release_file "$MIGRATION_RELEASE_FILE"
+  /opt/chatbot/ops/smoke candidate "$MIGRATION_RELEASE_FILE"
+  verify_tested_release "$MIGRATION_RELEASE_FILE"
+  [[ "$(sha256sum "$dynamic_file" | cut -d' ' -f1)" == "$TRAEFIK_SHA256" ]] \
+    || die "Traefik changed after candidate preparation"
+  [[ "$(docker inspect --format '{{.Id}}' "$legacy_web" 2>/dev/null || true)" == "$LEGACY_WEB_ID" ]] \
+    || die "legacy web container changed after preparation"
+  [[ "$(docker inspect --format '{{.Id}}' "$legacy_media" 2>/dev/null || true)" == "$LEGACY_MEDIA_ID" ]] \
+    || die "legacy media container changed after preparation"
+  [[ "$(docker inspect --format '{{.Id}}' "$legacy_workspace" 2>/dev/null || true)" == "$LEGACY_WORKSPACE_ID" ]] \
+    || die "legacy workspace container changed after preparation"
+
+  local handoff=false completed=false workspace_state_transferred=false
+  recover_on_failure() {
+    local status=$?
+    trap - EXIT INT TERM
+    if [[ "$handoff" == true && "$completed" == false ]]; then
+      printf 'Canonical cutover failed; restoring the exact legacy containers.\n' >&2
+      if ! restore_legacy; then
+        printf 'URGENT: automatic restoration did not complete; inspect with /opt/chatbot/ops/migrate-legacy status.\n' >&2
+      fi
+    fi
+    exit "$status"
+  }
+  trap recover_on_failure EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  handoff=true
+  docker update --restart=no "$legacy_web" "$legacy_media" "$legacy_workspace" >/dev/null
+  docker stop "$legacy_web" >/dev/null
+  copy_logs "$legacy_web"
+  docker stop "$legacy_media" "$legacy_workspace" >/dev/null
+  [[ "$(docker inspect --format '{{.State.Status}}' "$legacy_workspace")" == exited ]] \
+    || die "legacy workspace did not stop cleanly before state transfer"
+  sync_workspace_state_offline "$LEGACY_WORKSPACE_STATE" "$CHATBOT_RUNTIME/workspace" \
+    || die "legacy workspace state could not be validated and transferred"
+  workspace_state_transferred=true
+  docker rename "$legacy_web" "$LEGACY_WEB_BACKUP"
+  docker rename "$legacy_media" "$LEGACY_MEDIA_BACKUP"
+  docker rename "$legacy_workspace" "$LEGACY_WORKSPACE_BACKUP"
+  atomic_copy "$MIGRATION_RELEASE_FILE" "$CHATBOT_CURRENT_RELEASE"
+
+  live_compose "$CHATBOT_CURRENT_RELEASE" up -d --no-build --wait --wait-timeout 300
+  /opt/chatbot/ops/smoke live
+  [[ "$(sha256sum "$dynamic_file" | cut -d' ' -f1)" == "$TRAEFIK_SHA256" ]] \
+    || die "Traefik changed during cutover"
+  write_phase promoted
+
+  completed=true
+  handoff=false
+  trap - EXIT INT TERM
+  if ! test_compose "$MIGRATION_RELEASE_FILE" down --remove-orphans; then
+    printf 'Warning: production is healthy, but the loopback candidate could not be removed; run sudo /opt/chatbot/ops/cleanup.\n' >&2
+  fi
+  if ! rm -f -- "$CHATBOT_PENDING_RELEASE" "$CHATBOT_RUNTIME/tested.env" "$CHATBOT_TESTED_MANIFEST"; then
+    printf 'Warning: production is healthy, but stale pending/tested release pointers remain.\n' >&2
+  fi
+  printf '%s\n' \
+    'Canonical chatbot cutover completed.' \
+    'The public route still targets 127.0.0.1:3000.' \
+    'The three exact preceding containers are stopped and retained for rollback.' \
+    'After final user testing, retire them with:' \
+    '  sudo /opt/chatbot/ops/cleanup --retire-legacy'
+}
+
+rollback_legacy() {
+  load_migration_file
+  [[ "$MIGRATION_PHASE" == promoted ]] || die "legacy rollback is available only after promotion"
+  restore_legacy || die "the exact legacy containers could not be restored"
+  write_phase rolled-back
+  printf 'The exact pre-migration chatbot containers are live again on port 3000.\n'
+}
+
+status() {
+  if [[ -f "$migration_file" ]]; then
+    load_migration_file
+    printf 'Migration phase: %s\nMigration ID: %s\n' "$MIGRATION_PHASE" "$MIGRATION_ID"
+  else
+    printf 'Migration phase: not started\n'
+  fi
+  /opt/chatbot/ops/inventory
+}
+
+case "$action" in
+  prepare) prepare ;;
+  promote) promote ;;
+  rollback) rollback_legacy ;;
+  status) status ;;
+  *) die "usage: $0 {prepare|promote|rollback|status}" ;;
+esac

@@ -15,7 +15,7 @@ import {
 } from "../media-settings";
 
 const MEDIA_LITELLM_BASE_URL = (
-  process.env.MEDIA_LITELLM_BASE_URL ?? "http://media-litellm-candidate:4000/v1"
+  process.env.MEDIA_LITELLM_BASE_URL ?? "http://media:4000/v1"
 ).replace(/\/$/, "");
 const MEDIA_LITELLM_ORIGIN = MEDIA_LITELLM_BASE_URL.replace(/\/v1$/, "");
 const MEDIA_LITELLM_API_KEY = process.env.MEDIA_LITELLM_MASTER_KEY ?? "";

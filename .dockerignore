@@ -3,6 +3,7 @@
 node_modules
 logs
 generated-media
+.runtime
 deploy/production/state
 deploy/production/releases
 playwright-report

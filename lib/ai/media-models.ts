@@ -4,7 +4,7 @@ import { logger } from "@/lib/logger";
 
 const MEDIA_LITELLM_BASE_URL =
   process.env.MEDIA_LITELLM_BASE_URL ??
-  "http://media-litellm-candidate:4000/v1";
+  "http://media:4000/v1";
 const MEDIA_LITELLM_API_KEY = process.env.MEDIA_LITELLM_MASTER_KEY ?? "";
 const CACHE_TTL_MS = 30_000;
 

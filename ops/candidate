@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/chatbot/ops/lib.sh
+require_docker
+require_root
+ensure_runtime_dirs
+acquire_operation_lock
+
+release_file=${1:-$CHATBOT_PENDING_RELEASE}
+validate_release_file "$release_file"
+verify_release_images "$release_file"
+
+# A candidate is one fixed project. Remove the preceding candidate first so
+# test containers and networks cannot accumulate.
+test_compose "$release_file" down --remove-orphans >/dev/null 2>&1 || true
+if ! test_compose "$release_file" up -d --no-build --wait --wait-timeout 300; then
+  test_compose "$release_file" logs --no-color --tail 300 \
+    >"$CHATBOT_RUNTIME/test/failed.log" 2>&1 || true
+  test_compose "$release_file" down --remove-orphans >/dev/null 2>&1 || true
+  die "candidate failed; diagnostics: $CHATBOT_RUNTIME/test/failed.log"
+fi
+
+if ! /opt/chatbot/ops/smoke candidate "$release_file"; then
+  test_compose "$release_file" logs --no-color --tail 300 \
+    >"$CHATBOT_RUNTIME/test/failed.log" 2>&1 || true
+  test_compose "$release_file" down --remove-orphans >/dev/null 2>&1 || true
+  die "candidate smoke failed; diagnostics: $CHATBOT_RUNTIME/test/failed.log"
+fi
+
+atomic_copy "$release_file" "$CHATBOT_RUNTIME/tested.env"
+record_tested_release "$CHATBOT_RUNTIME/tested.env"
+printf '%s\n' \
+  'The loopback-only candidate is healthy at http://localhost:15008.' \
+  'It is not routed by Traefik and uses restart policy no.' \
+  'It shares the chat database and generated-media directory, so test content can persist.' \
+  'Workspace paths are isolated, and candidate forge access is disabled.' \
+  'After testing: sudo /opt/chatbot/ops/promote'

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/chatbot/ops/lib.sh
+require_docker
+require_root
+acquire_operation_lock
+
+validate_release_file "$CHATBOT_CURRENT_RELEASE"
+validate_release_file "$CHATBOT_PREVIOUS_RELEASE"
+verify_live_release "$CHATBOT_CURRENT_RELEASE"
+verify_release_images "$CHATBOT_PREVIOUS_RELEASE"
+current_tmp="$CHATBOT_RUNTIME/current.rollback.$$"
+install -o root -g optusers -m 0640 "$CHATBOT_CURRENT_RELEASE" "$current_tmp"
+completed=false
+restore_starting_release() {
+  local status=$? recovery_failed=false
+  trap - EXIT INT TERM
+  if [[ "$completed" == false && -f "$current_tmp" ]]; then
+    if ! atomic_copy "$current_tmp" "$CHATBOT_CURRENT_RELEASE" \
+      || ! live_compose "$CHATBOT_CURRENT_RELEASE" up -d --no-build --force-recreate --wait --wait-timeout 300 \
+      || ! /opt/chatbot/ops/smoke live; then
+      recovery_failed=true
+      printf 'URGENT: rollback failed and the starting release could not be restored automatically. Retained release file: %s\n' \
+        "$current_tmp" >&2
+    fi
+  fi
+  if [[ "$recovery_failed" == false && -e "$current_tmp" ]]; then
+    rm -- "$current_tmp"
+  fi
+  [[ "$recovery_failed" == false ]] || exit 1
+  exit "$status"
+}
+trap restore_starting_release EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+atomic_copy "$CHATBOT_PREVIOUS_RELEASE" "$CHATBOT_CURRENT_RELEASE"
+live_compose "$CHATBOT_CURRENT_RELEASE" up -d --no-build --force-recreate --wait --wait-timeout 300
+/opt/chatbot/ops/smoke live
+atomic_copy "$current_tmp" "$CHATBOT_PREVIOUS_RELEASE"
+completed=true
+trap - EXIT INT TERM
+rm -- "$current_tmp"
+printf 'Rollback completed; the replaced release is retained as previous.env.\n'

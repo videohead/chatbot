@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/chatbot/ops/lib.sh
+require_docker
+require_root
+acquire_operation_lock
+[[ ${1:-} == --confirm-public-stop ]] \
+  || die "this stops the public chatbot; rerun with --confirm-public-stop"
+[[ -f "$CHATBOT_CURRENT_RELEASE" ]] || die "canonical deployment is not initialized"
+require_canonical_live_mode
+verify_live_release "$CHATBOT_CURRENT_RELEASE"
+live_compose "$CHATBOT_CURRENT_RELEASE" stop
+printf 'The canonical chatbot services are stopped. Volumes, images, databases, and Traefik were retained.\n'

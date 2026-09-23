@@ -16,7 +16,7 @@ const WORKSPACE_SECRET_FILE =
   "/run/secrets/blechdom-workspace-token";
 const WORKSPACE_URL =
   process.env.CHATBOT_WORKSPACE_URL ??
-  "http://chatbot-workspace-blechdom:8080/mcp";
+  "http://workspace:8080/mcp";
 
 type WorkspaceToolName =
   | "git_auth_status"

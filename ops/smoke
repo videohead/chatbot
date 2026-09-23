@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /opt/chatbot/ops/lib.sh
+require_docker
+
+mode=${1:-live}
+case "$mode" in
+  live)
+    release_file=$CHATBOT_CURRENT_RELEASE
+    port=3000
+    compose_runner=live_compose
+    ;;
+  candidate)
+    release_file=${2:-$CHATBOT_PENDING_RELEASE}
+    port=15008
+    compose_runner=test_compose
+    ;;
+  *) die "usage: $0 [live|candidate [release-file]]" ;;
+esac
+
+validate_release_file "$release_file"
+wait_for_url "http://127.0.0.1:${port}/login" 30 \
+  || die "login endpoint did not become ready on port $port"
+
+"$compose_runner" "$release_file" exec -T web node - <<'NODE'
+const checks = [
+  ["media", "http://media:4000/health/liveliness"],
+  ["workspace", "http://workspace:8080/health"],
+];
+for (const [name, url] of checks) {
+  const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`${name} returned HTTP ${response.status}`);
+}
+NODE
+
+if [[ "$mode" == live ]]; then
+  curl --fail --silent --show-error --max-time 20 --insecure \
+    --resolve videohead.duckdns.org:443:127.0.0.1 \
+    --output /dev/null https://videohead.duckdns.org/login \
+    || die "public Traefik login endpoint failed"
+fi
+
+printf 'Chatbot %s health checks passed on 127.0.0.1:%s.\n' "$mode" "$port"

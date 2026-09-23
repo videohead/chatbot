@@ -10,13 +10,15 @@ The service accepts short-lived, account-bound requests signed by the chatbot.
 It runs as UID/GID `1000:1000`, has a read-only container filesystem, drops all
 capabilities, and does not mount the user's home, SSH keys, or Docker socket.
 
-Runtime policy, state, and the shared signing secret live outside this folder
-under `/home/blechdom/.config/chatbot-workspace` with private permissions.
+Runtime state lives under `/opt/chatbot/.runtime/workspace`. The shared signing
+secret and forge credentials live under `/etc/chatbot/secrets/workspace` with
+private permissions. The readable policy source is tracked at
+`/opt/chatbot/config/workspace-policy.json`; deployment mounts a private copy
+because the adapter deliberately rejects permissive policy-file modes.
 
-The Compose definition requires explicit host paths for both workspaces, state,
-policy, the signing token, and the two forge tokens. Their contents are never
-part of the image or this repository. The production Spark wrapper supplies
-those values when it builds or updates the adapter.
+The only Compose definition is `/opt/chatbot/compose.yaml`. It declares both
+workspace roots, state, policy, the signing token, and the two forge tokens.
+Credential contents are never part of the image or this repository.
 
 Fixed Git tools support repositories under either root. Remote access is
 restricted to `github.com` and `gitlab-master.nvidia.com`, uses HTTPS tokens
