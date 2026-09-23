@@ -34,6 +34,11 @@ existing database and generated-media directory, so their records and media
 can persist together. Candidate workspace files and workspace state are
 isolated under `.runtime/test`; forge access is disabled until promotion.
 
+The first legacy migration deliberately prepares an exact-image baseline. Run
+`sudo /opt/chatbot/ops/migrate-legacy build-candidate` after that preparation
+to compile the current committed source into immutable candidate images. Test
+those images on `127.0.0.1:15008` before promoting them to the stable port.
+
 Chat history remains in the existing PostgreSQL database behind `litellm_db`.
 This deployment does not create, replace, or remove that database or its
 volume.

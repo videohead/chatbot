@@ -31,6 +31,24 @@ write_phase() {
   mv -T -- "$tmp" "$migration_file"
 }
 
+write_migration_release() {
+  local release_file=$1 tmp="${migration_file}.tmp.$$"
+  validate_release_file "$release_file"
+  awk -v release_file="$release_file" '
+    BEGIN { changed=0 }
+    /^MIGRATION_RELEASE_FILE=/ {
+      print "MIGRATION_RELEASE_FILE=" release_file
+      changed=1
+      next
+    }
+    { print }
+    END { if (!changed) exit 1 }
+  ' "$migration_file" >"$tmp"
+  chown root:optusers "$tmp"
+  chmod 0640 "$tmp"
+  mv -T -- "$tmp" "$migration_file"
+}
+
 copy_logs() {
   local container=$1 source
   source="$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/app/logs"}}{{.Source}}{{end}}{{end}}' "$container" 2>/dev/null || true)"
@@ -236,7 +254,10 @@ prepare() {
       prepared)
         /opt/chatbot/ops/candidate "$MIGRATION_RELEASE_FILE"
         printf '%s\n' 'A canonical candidate is already prepared.' \
-          'Test http://localhost:15008, then run: sudo /opt/chatbot/ops/migrate-legacy promote'
+          'To rebuild the candidate from the current committed source, run:' \
+          '  sudo /opt/chatbot/ops/migrate-legacy build-candidate' \
+          'After testing http://localhost:15008, promote with:' \
+          '  sudo /opt/chatbot/ops/migrate-legacy promote'
         return
         ;;
       preparing)
@@ -448,7 +469,136 @@ EOF
   printf '%s\n' \
     'Canonical candidate preparation completed without changing the public service.' \
     'The candidate shares chat history and generated media; workspace paths are isolated.' \
-    'Test http://localhost:15008, then run:' \
+    'This baseline candidate retains the exact legacy web and workspace images.' \
+    'Build the current committed source for testing with:' \
+    '  sudo /opt/chatbot/ops/migrate-legacy build-candidate' \
+    'After testing http://localhost:15008, promote with:' \
+    '  sudo /opt/chatbot/ops/migrate-legacy promote'
+}
+
+build_candidate() {
+  load_migration_file
+  [[ "$MIGRATION_PHASE" == prepared ]] \
+    || die "migration phase is $MIGRATION_PHASE, expected prepared"
+  local preceding_release=$MIGRATION_RELEASE_FILE
+  validate_release_file "$preceding_release"
+  verify_release_images "$preceding_release"
+
+  [[ -z "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" \
+    status --porcelain --untracked-files=all)" ]] \
+    || die "the source checkout is dirty; preserve and commit collaborator work before building"
+  [[ -s "$CHATBOT_ROOT/model-catalog.json" ]] \
+    || die "model-catalog.json is missing; generate and validate the metadata catalog first"
+
+  local commit catalog_sha256 source_commit recorded_catalog
+  commit=$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)
+  catalog_sha256=$(sha256sum "$CHATBOT_ROOT/model-catalog.json" | cut -d' ' -f1)
+  source_commit=$(sed -n 's/^SOURCE_COMMIT=//p' "$(release_manifest_path "$preceding_release")")
+  recorded_catalog=$(sed -n 's/^MODEL_CATALOG_SHA256=//p' "$(release_manifest_path "$preceding_release")")
+  if [[ "$source_commit" == "$commit" && "$recorded_catalog" == "$catalog_sha256" ]]; then
+    /opt/chatbot/ops/candidate "$preceding_release"
+    printf '%s\n' \
+      'The loopback candidate already uses the current source commit and model catalog.' \
+      'Test http://localhost:15008, then run:' \
+      '  sudo /opt/chatbot/ops/migrate-legacy promote'
+    return
+  fi
+
+  load_release_file "$preceding_release"
+  local media_base=$CHATBOT_MEDIA_BASE_IMAGE
+  local short_commit=${commit:0:12}
+  local release_id="$(date -u +%Y%m%dT%H%M%SZ)-$short_commit"
+  local release_file="$CHATBOT_RUNTIME/releases/$release_id.env"
+  local build_root="$CHATBOT_RUNTIME/build/$release_id"
+  local build_context="$build_root/source"
+  local compose_snapshot="$CHATBOT_RUNTIME/releases/$release_id.compose.yaml"
+  local test_compose_snapshot="$CHATBOT_RUNTIME/releases/$release_id.compose.test.yaml"
+  local policy_snapshot="$CHATBOT_RUNTIME/releases/$release_id.workspace-policy.json"
+  local release_manifest="$CHATBOT_RUNTIME/releases/$release_id.manifest"
+  local candidate_switch_attempted=false refresh_complete=false
+
+  local web_image="local/chatbot-web:$release_id"
+  local media_image="local/chatbot-media:$release_id"
+  local workspace_image="local/chatbot-workspace:$release_id"
+  local image
+  for image in "$web_image" "$media_image" "$workspace_image"; do
+    ! docker image inspect "$image" >/dev/null 2>&1 \
+      || die "refusing to replace an existing release image: $image"
+  done
+  for image in "$release_file" "$compose_snapshot" "$test_compose_snapshot" \
+    "$policy_snapshot" "$release_manifest"; do
+    [[ ! -e "$image" ]] || die "refusing to replace an existing release artifact: $image"
+  done
+
+  install -d -o root -g optusers -m 0750 "$build_context"
+  cleanup_candidate_build() {
+    local status=$?
+    trap - EXIT INT TERM
+    set +e
+    if [[ "$refresh_complete" == false ]]; then
+      if [[ "$candidate_switch_attempted" == true ]]; then
+        printf 'Source candidate activation failed; restoring the preceding loopback candidate.\n' >&2
+        if ! /opt/chatbot/ops/candidate "$preceding_release"; then
+          printf 'URGENT: the preceding loopback candidate could not be restored; production remains unchanged.\n' >&2
+        fi
+      fi
+      atomic_copy "$preceding_release" "$CHATBOT_PENDING_RELEASE" 2>/dev/null || true
+      docker image rm "$web_image" "$media_image" "$workspace_image" >/dev/null 2>&1 || true
+      rm -f -- "$release_file" "$release_manifest" "$compose_snapshot" \
+        "$test_compose_snapshot" "$policy_snapshot"
+    fi
+    [[ ! -d "$build_root" ]] || rm -rf --one-file-system -- "$build_root"
+    exit "$status"
+  }
+  trap cleanup_candidate_build EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" archive "$commit" \
+    | tar -x -C "$build_context"
+  install -o root -g optusers -m 0640 "$CHATBOT_ROOT/model-catalog.json" \
+    "$build_context/model-catalog.json"
+
+  cat >"$release_file" <<EOF
+CHATBOT_RELEASE_ID=$release_id
+CHATBOT_WEB_IMAGE=$web_image
+CHATBOT_MEDIA_IMAGE=$media_image
+CHATBOT_MEDIA_BASE_IMAGE=$media_base
+CHATBOT_WORKSPACE_IMAGE=$workspace_image
+EOF
+  chown root:optusers "$release_file"
+  chmod 0640 "$release_file"
+  validate_release_file "$release_file"
+  snapshot_release_configuration "$release_file"
+
+  CHATBOT_PROJECT_NAME=chatbot-build \
+  CHATBOT_BUILD_CONTEXT="$build_context" \
+  CHATBOT_WORKSPACE_BUILD_CONTEXT="$build_context/services/workspace" \
+    docker compose --env-file "$release_file" -f "$compose_snapshot" \
+      build --builder default web workspace
+  derive_media_image "$media_base" "$media_image" "$build_context"
+
+  [[ "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" rev-parse HEAD)" == "$commit" ]] \
+    || die "source commit changed during the build"
+  [[ -z "$(git -c safe.directory="$CHATBOT_ROOT" -C "$CHATBOT_ROOT" \
+    status --porcelain --untracked-files=all)" ]] \
+    || die "source checkout changed during the build"
+  [[ "$(sha256sum "$CHATBOT_ROOT/model-catalog.json" | cut -d' ' -f1)" == "$catalog_sha256" ]] \
+    || die "model catalog changed during the build"
+  write_release_manifest "$release_file" "$commit" "$catalog_sha256"
+
+  candidate_switch_attempted=true
+  /opt/chatbot/ops/candidate "$release_file"
+  atomic_copy "$release_file" "$CHATBOT_PENDING_RELEASE"
+  write_migration_release "$release_file"
+  refresh_complete=true
+  trap - EXIT INT TERM
+  rm -rf --one-file-system -- "$build_root"
+
+  printf '%s\n' \
+    "The source-built candidate is healthy at http://localhost:15008 (commit $short_commit)." \
+    'The public service on port 3000 was not changed.' \
+    'After testing the sidebar, login, models, media, and workspace tools, promote with:' \
     '  sudo /opt/chatbot/ops/migrate-legacy promote'
 }
 
@@ -540,8 +690,9 @@ status() {
 
 case "$action" in
   prepare) prepare ;;
+  build-candidate) build_candidate ;;
   promote) promote ;;
   rollback) rollback_legacy ;;
   status) status ;;
-  *) die "usage: $0 {prepare|promote|rollback|status}" ;;
+  *) die "usage: $0 {prepare|build-candidate|promote|rollback|status}" ;;
 esac
