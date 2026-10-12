@@ -13,6 +13,7 @@ services:
       CHATBOT_DEPLOYMENT_LABEL: production
       CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "true"
       CHATBOT_MEDIA_ROOT: /app/media
+      CHATBOT_MEMORY_ENABLED: "true"
       CHATBOT_LOG_BODIES: "false"
       CHATBOT_LOG_DIR: /app/logs
       CHATBOT_LOG_LEVEL: info
