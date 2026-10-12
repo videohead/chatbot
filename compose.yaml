@@ -1,61 +1,47 @@
-name: ${CHATBOT_PROJECT_NAME:-chatbot}
+name: chatbot
 
 services:
   web:
-    image: ${CHATBOT_WEB_IMAGE:-local/chatbot-web:current}
-    build:
-      context: ${CHATBOT_BUILD_CONTEXT:-.}
-      dockerfile: deploy/production/Dockerfile
-      target: runtime
+    image: local/chatbot:latest
     ports:
-      - "127.0.0.1:${CHATBOT_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      AGENT_FRAMEWORK_URL: ${AGENT_FRAMEWORK_URL:-http://agent-framework:8000}
+      AGENT_FRAMEWORK_URL: http://agent-framework:8000
       AUTH_SECRET_FILE: /run/secrets/chatbot-auth-secret
       AUTH_TRUST_HOST: "true"
-      AUTH_URL: ${CHATBOT_AUTH_URL:-https://videohead.duckdns.org}
-      CHATBOT_DEPLOYMENT_LABEL: ${CHATBOT_DEPLOYMENT_LABEL:-production}
+      AUTH_URL: https://videohead.duckdns.org
+      CHATBOT_DEPLOYMENT_LABEL: production
+      CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "true"
+      CHATBOT_MEDIA_ROOT: /app/media
       CHATBOT_LOG_BODIES: "false"
       CHATBOT_LOG_DIR: /app/logs
       CHATBOT_LOG_LEVEL: info
-      CHATBOT_POSTGRES_DATABASE: ${CHATBOT_POSTGRES_DATABASE:-chatbot}
-      CHATBOT_POSTGRES_HOST: ${CHATBOT_POSTGRES_HOST:-litellm_db}
+      CHATBOT_POSTGRES_DATABASE: chatbot
+      CHATBOT_POSTGRES_HOST: litellm_db
       CHATBOT_POSTGRES_PASSWORD_FILE: /run/secrets/chatbot-postgres-password
-      CHATBOT_POSTGRES_PORT: ${CHATBOT_POSTGRES_PORT:-5432}
-      CHATBOT_POSTGRES_USER: ${CHATBOT_POSTGRES_USER:-chatbot_app}
-      CHATBOT_WORKSPACE_ACCOUNT: ${CHATBOT_WORKSPACE_ACCOUNT:-blechdom@gmail.com}
-      CHATBOT_WORKSPACE_ENABLED: "true"
-      CHATBOT_WORKSPACE_SECRET_FILE: /run/secrets/workspace-token
-      CHATBOT_WORKSPACE_URL: http://workspace:8080/mcp
+      CHATBOT_POSTGRES_PORT: "5432"
+      CHATBOT_POSTGRES_USER: chatbot_app
+      CHATBOT_WORKSPACE_ENABLED: "false"
       LITELLM_API_KEY_FILE: /run/secrets/litellm-client-key
-      LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000/v1}
+      LITELLM_BASE_URL: http://litellm:4000/v1
       LOG_LEVEL: info
-      MEDIA_LITELLM_BASE_URL: http://media:4000/v1
-      MEDIA_LITELLM_MASTER_KEY_FILE: /run/secrets/media-litellm-master-key
       NEXT_TELEMETRY_DISABLED: "1"
       NODE_ENV: production
     secrets:
       - chatbot-auth-secret
       - chatbot-postgres-password
       - litellm-client-key
-      - media-litellm-master-key
-      - workspace-token
     volumes:
       - type: bind
-        source: ${CHATBOT_LOGS_DIR:-/opt/chatbot/logs}
+        source: /opt/chatbot/logs
         target: /app/logs
         bind:
           create_host_path: false
       - type: bind
-        source: ${CHATBOT_GENERATED_MEDIA_DIR:-/opt/chatbot/generated-media}
-        target: /app/generated-media
+        source: /opt/ComfyUI/output/chatbot
+        target: /app/media
         bind:
           create_host_path: false
-    depends_on:
-      media:
-        condition: service_healthy
-      workspace:
-        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -74,115 +60,13 @@ services:
     networks:
       - default
       - metis-network
-    restart: ${CHATBOT_RESTART_POLICY:-unless-stopped}
+    restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
       - /app/.next/cache:size=256m,uid=1000,gid=1000,mode=0700
     security_opt:
       - no-new-privileges:true
-
-  media:
-    image: ${CHATBOT_MEDIA_IMAGE:-local/chatbot-media:current}
-    build:
-      context: ${CHATBOT_BUILD_CONTEXT:-.}
-      dockerfile: deploy/media/Dockerfile
-      args:
-        LITELLM_BASE_IMAGE: ${CHATBOT_MEDIA_BASE_IMAGE:-docker.litellm.ai/berriai/litellm:main-stable}
-    command:
-      - --config
-      - /app/chatbot-media-config.yaml
-    environment:
-      HOME: /tmp
-      LITELLM_MIGRATION_DIR: /app/migrations
-      XDG_CACHE_HOME: /app/cache
-    secrets:
-      - media-litellm-master-key
-      - nvidia-hub-key
-      - nvidia-inference-api-key
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"
-      interval: 10s
-      timeout: 5s
-      retries: 18
-      start_period: 20s
-    logging:
-      driver: local
-      options:
-        max-file: "5"
-        max-size: 25m
-    restart: ${CHATBOT_RESTART_POLICY:-unless-stopped}
-    read_only: true
-    tmpfs:
-      - /tmp:size=128m,mode=1777
-      - /app/cache:size=256m,mode=1777
-      - /app/migrations:size=64m,mode=1777
-    security_opt:
-      - no-new-privileges:true
-
-  workspace:
-    image: ${CHATBOT_WORKSPACE_IMAGE:-local/chatbot-workspace:current}
-    build:
-      context: ${CHATBOT_WORKSPACE_BUILD_CONTEXT:-services/workspace}
-    user: "1000:1000"
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    pids_limit: 64
-    mem_limit: 256m
-    environment:
-      TOOLS_SERVICE_KIND: workspace
-      TOOLS_SERVICE_ID: workspace-blechdom
-      TOOLS_POLICY_FILE: /run/secrets/policy.json
-      TOOLS_SHARED_SECRET_FILE: /run/secrets/token
-      WORKSPACE_PERSONAL_FILES: "true"
-    volumes:
-      - type: bind
-        source: ${CHATBOT_CREATIVE_DIR:-/home/blechdom/creative}
-        target: /workspace/creative
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${CHATBOT_NVIDIA_DIR:-/home/blechdom/nvidia}
-        target: /workspace/nvidia
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ${CHATBOT_WORKSPACE_STATE_DIR:-/opt/chatbot/.runtime/workspace}
-        target: /data
-        bind:
-          create_host_path: false
-    secrets:
-      - source: workspace-policy
-        target: policy.json
-      - source: workspace-token
-        target: token
-      - source: github-token
-        target: github.token
-      - source: gitlab-token
-        target: gitlab.token
-    tmpfs:
-      - /tmp:size=32m,mode=1777
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
-      interval: 5s
-      timeout: 4s
-      retries: 18
-      start_period: 3s
-    logging:
-      driver: local
-      options:
-        max-file: "5"
-        max-size: 25m
-    restart: ${CHATBOT_RESTART_POLICY:-unless-stopped}
 
 secrets:
   chatbot-auth-secret:
@@ -191,20 +75,6 @@ secrets:
     file: /etc/chatbot/secrets/postgres-password
   litellm-client-key:
     file: /etc/chatbot/secrets/litellm-client.key
-  media-litellm-master-key:
-    file: /etc/chatbot/secrets/media-litellm-master.key
-  nvidia-hub-key:
-    file: /etc/chatbot/secrets/provider/nvidia-hub.key
-  nvidia-inference-api-key:
-    file: /etc/chatbot/secrets/provider/nvidia-inference-api.key
-  workspace-token:
-    file: ${CHATBOT_WORKSPACE_TOKEN_FILE:-/etc/chatbot/secrets/workspace/token}
-  workspace-policy:
-    file: ${CHATBOT_WORKSPACE_POLICY_FILE:-/etc/chatbot/secrets/workspace/policy.json}
-  github-token:
-    file: ${CHATBOT_GITHUB_TOKEN_FILE:-/etc/chatbot/secrets/workspace/github.token}
-  gitlab-token:
-    file: ${CHATBOT_GITLAB_TOKEN_FILE:-/etc/chatbot/secrets/workspace/gitlab.token}
 
 networks:
   metis-network:

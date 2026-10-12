@@ -18,8 +18,6 @@ read_secret() {
 
 read_secret AUTH_SECRET "${AUTH_SECRET_FILE:-/run/secrets/chatbot-auth-secret}"
 read_secret LITELLM_API_KEY "${LITELLM_API_KEY_FILE:-/run/secrets/litellm-client-key}"
-read_secret MEDIA_LITELLM_MASTER_KEY \
-  "${MEDIA_LITELLM_MASTER_KEY_FILE:-/run/secrets/media-litellm-master-key}"
 read_secret CHATBOT_POSTGRES_PASSWORD \
   "${CHATBOT_POSTGRES_PASSWORD_FILE:-/run/secrets/chatbot-postgres-password}"
 

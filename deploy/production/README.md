@@ -13,6 +13,7 @@ files, constructs the PostgreSQL connection string in memory, and drops from
 root to the unprivileged Node user. Source code and `node_modules` are not
 mounted into production.
 
-Builds, candidate validation, promotion, and rollback are performed only by
-the commands under `/opt/chatbot/ops`. Release identity is carried in image
-tags and `.runtime` manifests; Compose project and service names stay stable.
+Builds are performed with plain Docker from this directory; release identity
+is carried in the image tag referenced by the root
+[`compose.yaml`](../../compose.yaml), which is the single source of truth for
+the deployed release. Compose project and service names stay stable.

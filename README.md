@@ -58,10 +58,8 @@ Both services must be running and attached to the `metis-network` Docker network
 ## Primary DGX Spark deployment
 
 This checkout supplies the public chatbot through Traefik and binds Next.js
-only to `127.0.0.1:3000`. See [DEPLOYMENT.md](DEPLOYMENT.md) for guarded start,
-verification, restart, stop, and rollback commands. The Docker container names
-retain their historical candidate suffix because the tested container was
-promoted in place.
+only to `127.0.0.1:3000`. See [DEPLOYMENT.md](DEPLOYMENT.md) for start,
+verification, restart, stop, and image rebuild commands.
 
 ## Running locally
 

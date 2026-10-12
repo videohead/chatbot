@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -Eeuo pipefail
-source /opt/chatbot/ops/lib.sh
-require_docker
-[[ -f "$CHATBOT_CURRENT_RELEASE" ]] || die "canonical deployment is not initialized"
-require_canonical_live_mode
-tail_count=${CHATBOT_LOG_TAIL:-200}
-live_compose "$CHATBOT_CURRENT_RELEASE" logs --no-color --tail "$tail_count" "$@"
