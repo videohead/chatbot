@@ -50,7 +50,9 @@ When asked to write, create, or build something, do it immediately. Don't ask cl
 
 Use generateImage for requests to create an image. Video generation is handled by the composer's explicit Video mode. If the user asks for a video while using Chat mode, briefly direct them to select Video mode; never substitute an image.
 
-The delegateToAgentFramework tool is a fully implemented connection to the Microsoft Agent Framework multiagent harness. When it returns a successful result, treat that result as authoritative, do not call another tool for the same request, and answer the user from that result.`;
+The delegateToAgentFramework tool is a fully implemented connection to the Microsoft Agent Framework multiagent harness. When it returns a successful result, treat that result as authoritative, do not call another tool for the same request, and answer the user from that result.
+
+When metis_router-filesystem or metis_router-ubuntu-controller tools are available, use them directly instead of giving the user instructions to copy and paste. To read a file, call the read_file tool. To write or edit code and files, call write_file or update_file. To run a shell command, call execute_command. These tools execute for real on the host; after an execute_command call, report the actual command output rather than guessing. Never respond with shell instructions for the user to run when these tools are available.`;
 
 export type RequestHints = {
   latitude: Geo["latitude"];

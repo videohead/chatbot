@@ -1,5 +1,6 @@
 "use client";
 import type { UseChatHelpers } from "@ai-sdk/react";
+import type { DynamicToolUIPart } from "ai";
 import Image from "next/image";
 import { useCallback, useEffect, useState } from "react";
 import type { Vote } from "@/lib/db/schema";
@@ -396,6 +397,48 @@ const PurePreviewMessage = ({
               <div className="text-muted-foreground text-sm">
                 Workspace change was denied.
               </div>
+            )}
+          </ToolContent>
+        </Tool>
+      );
+    }
+
+    if (type === "dynamic-tool") {
+      const toolPart = part as DynamicToolUIPart;
+      const { state, toolCallId, toolName } = toolPart;
+      const title = toolName
+        .replace(/^[^-]+-/, "")
+        .replace(/([a-z])([A-Z])/g, "$1 $2")
+        .replace(/_/g, " ");
+      const showInput =
+        state === "input-available" ||
+        state === "input-streaming" ||
+        state === "approval-requested" ||
+        state === "approval-responded";
+      const input = "input" in toolPart ? toolPart.input : undefined;
+      const output = "output" in toolPart ? toolPart.output : undefined;
+      const errorText =
+        "errorText" in toolPart ? toolPart.errorText : undefined;
+
+      return (
+        <Tool
+          className="w-[min(100%,720px)]"
+          defaultOpen={state !== "output-available"}
+          key={toolCallId}
+        >
+          <ToolHeader
+            state={state}
+            title={title}
+            toolName={toolName}
+            type="dynamic-tool"
+          />
+          <ToolContent>
+            {showInput && input !== undefined && <ToolInput input={input} />}
+            {state === "output-available" && (
+              <ToolOutput errorText={undefined} output={output} />
+            )}
+            {state === "output-error" && (
+              <ToolOutput errorText={errorText} output={undefined} />
             )}
           </ToolContent>
         </Tool>

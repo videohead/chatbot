@@ -10,7 +10,9 @@ import {
 } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-const MEDIA_ROOT = join(process.cwd(), "generated-media");
+const MEDIA_ROOT = process.env.CHATBOT_MEDIA_ROOT
+  ? join(process.env.CHATBOT_MEDIA_ROOT)
+  : join(process.cwd(), "generated-media");
 
 const EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
