@@ -9,7 +9,6 @@
     "check": "ultracite check",
     "test:unit": "tsx --test tests/unit/*.test.ts",
     "fix": "ultracite fix",
-    "prepare": "husky",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "npx tsx lib/db/migrate.ts",
     "db:studio": "drizzle-kit studio",
@@ -101,16 +100,11 @@
     "@types/react-dom": "^18",
     "babel-plugin-react-compiler": "^1.0.0",
     "drizzle-kit": "^0.31.10",
-    "husky": "^9.1.7",
-    "lint-staged": "^16.4.0",
     "postcss": "^8",
     "tailwindcss": "^4.3.2",
     "tsx": "^4.23.0",
     "typescript": "^5.6.3",
     "ultracite": "^7.8.4"
-  },
-  "lint-staged": {
-    "*": "corepack pnpm run fix --"
   },
   "packageManager": "pnpm@10.32.1"
 }
