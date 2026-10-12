@@ -33,6 +33,11 @@ import {
 import { DEFAULT_CHAT_MODEL } from "@/lib/ai/models";
 import { type RequestHints, systemPrompt } from "@/lib/ai/prompts";
 import { getLanguageModel } from "@/lib/ai/providers";
+import {
+  formatChatMemoryContext,
+  searchChatMemory,
+  storeChatMemory,
+} from "@/lib/ai/chat-memory";
 import { createDocument } from "@/lib/ai/tools/create-document";
 import { createAgentFrameworkTool } from "@/lib/ai/tools/delegate-agent-framework";
 import { editDocument } from "@/lib/ai/tools/edit-document";
@@ -1002,6 +1007,34 @@ export async function POST(request: Request) {
           ...litellmMcpTools,
         };
 
+        const memoryQuery = message?.parts
+          ?.filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join(" ")
+          .slice(0, 500) ?? "";
+        let memoryContext = "";
+        if (memoryQuery) {
+          try {
+            const memoryRows = await searchChatMemory({
+              chatId: id,
+              query: memoryQuery,
+              userId: session.user.id,
+            });
+            memoryContext = formatChatMemoryContext(memoryRows);
+            if (memoryRows.length > 0) {
+              logger.info("chat.memory.retrieved", {
+                chatId: id,
+                chunkCount: memoryRows.length,
+              });
+            }
+          } catch (error) {
+            logger.warn("chat.memory.retrieve_failed", {
+              chatId: id,
+              error,
+            });
+          }
+        }
+
         const result = streamText({
           activeTools: supportsTools
             ? [
@@ -1020,7 +1053,7 @@ export async function POST(request: Request) {
             workspaceAccess
               ? "\n\nYou have account-scoped workspace tools. The tool path creative/ maps to /home/blechdom/creative and nvidia/ maps to /home/blechdom/nvidia. Use workspaceList or workspaceRead before claiming local files are unavailable. To edit a file, read it, propose the complete replacement with workspaceProposePatch, show the returned diff to the user, then request workspaceApplyPatch approval. Use the Git tools for repositories under those roots; inspect status and diffs before commits, and request approval for every push."
               : ""
-          }`,
+          }${memoryContext ? `\n\n${memoryContext}` : ""}`,
           messages: modelMessages,
           model: getLanguageModel(chatModel),
           onAbort() {
@@ -1157,6 +1190,39 @@ export async function POST(request: Request) {
               parts: persistMessageParts(currentMessage),
               role: currentMessage.role,
             })),
+          });
+        }
+
+        // Store large text and tool-output content as chat memory for
+        // later retrieval. Failures are non-fatal; the chat still works.
+        try {
+          for (const currentMessage of finishedMessages) {
+            const persistableParts = currentMessage.parts.filter(
+              (part) =>
+                (part.type === "text" && part.text.length >= 2000) ||
+                (part.type === "dynamic-tool" &&
+                  part.state === "output-available" &&
+                  part.output != null &&
+                  String(part.output).length >= 2000)
+            );
+            for (const part of persistableParts) {
+              const content =
+                part.type === "text"
+                  ? part.text
+                  : String((part as { output?: unknown }).output ?? "");
+              await storeChatMemory({
+                chatId: id,
+                content,
+                metadata: { partType: part.type },
+                sourceMessageId: currentMessage.id,
+                userId: session.user.id,
+              });
+            }
+          }
+        } catch (error) {
+          logger.warn("chat.memory.store_failed", {
+            chatId: id,
+            error,
           });
         }
       },

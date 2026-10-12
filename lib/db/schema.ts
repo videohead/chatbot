@@ -135,3 +135,33 @@ export const stream = pgTable(
 );
 
 export type Stream = InferSelectModel<typeof stream>;
+
+export const chatMemory = pgTable(
+  "ChatMemory",
+  {
+    chatId: uuid("chatId")
+      .notNull()
+      .references(() => chat.id, { onDelete: "cascade" }),
+    content: text("content").notNull(),
+    createdAt: timestamp("createdAt").notNull().defaultNow(),
+    id: uuid("id").notNull().defaultRandom(),
+    metadata: json("metadata").notNull(),
+    sourceMessageId: uuid("sourceMessageId"),
+    userId: uuid("userId")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.id] }),
+    chatRef: foreignKey({
+      columns: [table.chatId],
+      foreignColumns: [chat.id],
+    }),
+    userRef: foreignKey({
+      columns: [table.userId],
+      foreignColumns: [user.id],
+    }),
+  })
+);
+
+export type ChatMemory = InferSelectModel<typeof chatMemory>;
