@@ -44,7 +44,16 @@ This template uses the [Vercel AI Gateway](https://vercel.com/docs/ai-gateway) t
 
 **For non-Vercel deployments**: You need to provide an AI Gateway API key by setting the `AI_GATEWAY_API_KEY` environment variable in your `.env.local` file.
 
-With the [AI SDK](https://ai-sdk.dev/docs/introduction), you can also switch to direct LLM providers like [OpenAI](https://openai.com), [Anthropic](https://anthropic.com), [Cohere](https://cohere.com/), and [many more](https://ai-sdk.dev/providers/ai-sdk-providers) with just a few lines of code.
+With the [AI SDK](https://ai-sdk.dev/docs/introduction), you can also switch to direct LLM providers like [OpenAI](https://openai.com), [Anthropic](https://anthropic.com), [Cohere](https://cohere.com), and [many more](https://ai-sdk.dev/providers/ai-sdk-providers) with just a few lines of code.
+
+## Dependencies
+
+This fork adds two external services that are **required** for the Docker deployment to work:
+
+- [LiteLLM](https://github.com/videohead/litellm) — model routing proxy. All model requests go through `LITELLM_BASE_URL`, authenticated with a client key supplied as a Docker secret.
+- [Metis Router](https://github.com/videohead/metis-router) — MCP gateway that exposes host tools (filesystem, shell, controllers) to the chatbot over the shared `metis-network`.
+
+Both services must be running and attached to the `metis-network` Docker network before the chatbot starts. Credentials for models and infrastructure are provided at runtime via Docker secrets and `.env` files; no keys are stored in this repository.
 
 ## Primary DGX Spark deployment
 
