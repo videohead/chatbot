@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { logger } from "@/lib/logger";
 import {
   type ChatModel,
+  DEFAULT_CHAT_MODEL,
   getModelProvider,
   type ModelCapabilities,
 } from "./models";
@@ -133,6 +134,40 @@ async function fetchLitellmModelIds(): Promise<string[]> {
   return (json.data ?? []).map((m) => m.id);
 }
 
+/**
+ * Fetch unhealthy model deployment IDs from LiteLLM's /health endpoint.
+ * Returns a set of model_name values whose endpoints are currently failing.
+ * Used to filter unhealthy models from the chat selector.
+ */
+async function fetchUnhealthyModelNames(): Promise<Set<string>> {
+  try {
+    const res = await fetch(
+      `${LITELLM_BASE_URL.replace(/\/v1$/, "")}/health`,
+      {
+        headers: { Authorization: `Bearer ${LITELLM_API_KEY}` },
+        signal: AbortSignal.timeout(5000),
+      }
+    );
+    if (!res.ok) return new Set();
+    const json = (await res.json()) as {
+      unhealthy_endpoints?: { model?: string }[];
+    };
+    const unhealthy = new Set<string>();
+    for (const ep of json.unhealthy_endpoints ?? []) {
+      if (ep.model) {
+        // LiteLLM health returns the litellm_params.model (e.g. "openai/gpt-oss-20b");
+        // the model_name in config.yaml is what /v1/models exposes (e.g. "gpt-oss-20b").
+        // We collect the raw model strings and match them loosely.
+        unhealthy.add(ep.model);
+      }
+    }
+    return unhealthy;
+  } catch {
+    logger.debug("litellm.health.fetch_failed");
+    return new Set();
+  }
+}
+
 function buildState(ids: string[]): LitellmState {
   const catalog = readCatalog();
   const catalogById = new Map(catalog.map((m) => [m.id, m]));
@@ -189,14 +224,35 @@ async function getLitellmState(): Promise<LitellmState> {
     return cache;
   }
   try {
-    const ids = await fetchLitellmModelIds();
+    const [ids, unhealthyModels] = await Promise.all([
+      fetchLitellmModelIds(),
+      fetchUnhealthyModelNames(),
+    ]);
     if (ids.length === 0) {
       throw new Error("LiteLLM returned no models");
     }
-    cache = buildState(ids);
+
+    // Filter out models where all endpoints are unhealthy.
+    // The health endpoint returns model strings like "openai/gpt-oss-20b";
+    // the /v1/models endpoint returns model names like "gpt-oss-20b".
+    // A model is excluded only if it matches an unhealthy entry and has no
+    // healthy entry.
+    const healthyIds = unhealthyModels.size > 0
+      ? ids.filter((id) => {
+          const isUnhealthy = unhealthyModels.has(`openai/${id}`) ||
+            unhealthyModels.has(id);
+          if (isUnhealthy) {
+            logger.info("litellm.model.excluded_unhealthy", { modelId: id });
+          }
+          return !isUnhealthy;
+        })
+      : ids;
+
+    cache = buildState(healthyIds.length > 0 ? healthyIds : ids);
     logger.info("litellm.state.refreshed", {
       cacheTtlMs: CACHE_TTL_MS,
       chatModelCount: cache.models.length,
+      excludedUnhealthyCount: ids.length - healthyIds.length,
       proxyDeploymentCount: ids.length,
     });
     return cache;
@@ -210,7 +266,7 @@ async function getLitellmState(): Promise<LitellmState> {
       });
       return cache;
     }
-    const fallbackIds = ["gpt-oss-20b"];
+    const fallbackIds = [DEFAULT_CHAT_MODEL];
     logger.error("litellm.state.using_fallback_after_error", {
       error,
       fallbackIds,
@@ -252,4 +308,25 @@ export async function getModelAvailability(
 ): Promise<ModelAvailability> {
   const state = await getLitellmState();
   return state.ids.has(modelId) ? "healthy" : "unknown";
+}
+
+/**
+ * Return the id of the first healthy, available model.
+ * Prefers models that support tool calling. Falls back to DEFAULT_CHAT_MODEL
+ * only if the live list is unavailable.
+ */
+export async function getFirstHealthyModelId(): Promise<string> {
+  try {
+    const state = await getLitellmState();
+    // Prefer a model that supports tools
+    for (const m of state.models) {
+      const caps = state.capabilities[m.id];
+      if (caps?.tools) return m.id;
+    }
+    // Any model is better than a down default
+    if (state.models.length > 0) return state.models[0].id;
+  } catch {
+    // Fall through to default
+  }
+  return DEFAULT_CHAT_MODEL;
 }

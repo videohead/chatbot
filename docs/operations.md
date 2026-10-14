@@ -10,6 +10,7 @@ The project has one checkout and one production Compose entrypoint.
 | Production container | `chatbot-web-1` |
 | Public loopback port | `127.0.0.1:3000` |
 | Logs | `/opt/chatbot/logs` |
+| Tool chain log map | [`tool-chain-logging.md`](tool-chain-logging.md) |
 | Generated media | `/opt/chatbot/generated-media` |
 | Credentials | `/etc/chatbot/secrets` |
 | Public routing | `/opt/traefik/dynamic.yml` |

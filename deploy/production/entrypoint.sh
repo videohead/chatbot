@@ -33,4 +33,22 @@ export POSTGRES_URL
 unset CHATBOT_POSTGRES_PASSWORD
 
 mkdir -p "${CHATBOT_LOG_DIR:-/app/logs}" /app/generated-media
-exec gosu node "$@"
+
+# Persistent logging: tee stdout/stderr to a dated file plus a `current`
+# symlink so the chatbot -> LiteLLM -> metis tool chain can be traced after
+# container restarts. See docs/tool-chain-logging.md.
+log_dir="${CHATBOT_LOG_DIR:-/app/logs}"
+log_file="$log_dir/chatbot-$(date -u +%Y-%m-%d).log"
+chown node:node "$log_dir" 2>/dev/null || true
+
+printf '{"event":"container.start","level":"info","service":"chatbot","timestamp":"%s","argv":%s,"logFile":"%s"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$(node -e 'console.log(JSON.stringify(process.argv.slice(1)))' "$@")" \
+  "$log_file" >> "$log_file"
+chown node:node "$log_file" 2>/dev/null || true
+
+ln -sfn "$(basename "$log_file")" "$log_dir/chatbot-current.log"
+
+# Run the app as the node user with stdout/stderr teed into the dated file.
+# Inside the -c script, $0 is the log file and "$@" is the app command.
+exec gosu node sh -c '"$@" 2>&1 | tee -a "$0"' "$log_file" "$@"

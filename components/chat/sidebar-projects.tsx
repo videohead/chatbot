@@ -6,6 +6,7 @@ import {
   Brain,
   Cpu,
   Film,
+  Folder,
   GitBranch,
   Layers,
   type LucideIcon,
@@ -33,6 +34,16 @@ const serviceOrigin = (
 ).replace(/\/$/, "");
 
 const projects: Project[] = [
+    {
+    href: `${serviceOrigin}/litellm/health/liveliness`,
+    icon: Network,
+    name: "LiteLLM Health",
+  },
+  {
+    href: `${serviceOrigin}/filebrowser/`,
+    icon: Folder,
+    name: "FileBrowser",
+  },
   {
     href: `${serviceOrigin}/worldgraphstudio/`,
     icon: GitBranch,
@@ -45,17 +56,6 @@ const projects: Project[] = [
     href: `${serviceOrigin}/audiobrain/`,
     icon: AudioWaveform,
     name: "AudioBrain",
-  },
-  { href: `${serviceOrigin}/vllm/v1/models`, icon: Cpu, name: "vLLM" },
-  {
-    href: `${serviceOrigin}/agent-framework`,
-    icon: Bot,
-    name: "Agent Framework",
-  },
-  {
-    href: `${serviceOrigin}/litellm/health/liveliness`,
-    icon: Network,
-    name: "LiteLLM",
   },
 ];
 

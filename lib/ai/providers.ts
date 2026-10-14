@@ -15,25 +15,23 @@ const LITELLM_MCP_SERVER = process.env.LITELLM_MCP_SERVER ?? "metis_router";
 const LITELLM_MCP_TOOL_PREFIX = `${LITELLM_MCP_SERVER}-`;
 const TOOL_CHOICE_COMPAT_MODELS = new Set(["azure/openai/gpt-5.4"]);
 
-function appendLitellmMcpGateway(args: Record<string, any>) {
-  if (!Array.isArray(args.tools) || args.tools.length === 0) {
-    return args;
-  }
+function appendLitellmMcpGateway(args: Record<string, any>): Record<string, any> {
+  // Always append the MCP gateway block so LiteLLM discovers and exposes
+  // Metis Router tools to the model, regardless of whether local stub
+  // tools are registered. When CHATBOT_ENABLE_DIRECT_MCP_TOOLS is off,
+  // no local stubs exist but the gateway block still needs to be present.
+  const tools = Array.isArray(args.tools) ? args.tools : [];
 
-  const localMcpTools = args.tools.filter(
+  // Remove any local MCP stubs (if direct mode is on) -- the gateway
+  // handles execution server-side.
+  const appTools = tools.filter(
     (tool: Record<string, any>) =>
-      tool?.type === "function" &&
-      typeof tool.function?.name === "string" &&
-      tool.function.name.startsWith(LITELLM_MCP_TOOL_PREFIX)
+      !(
+        tool?.type === "function" &&
+        typeof tool.function?.name === "string" &&
+        tool.function.name.startsWith(LITELLM_MCP_TOOL_PREFIX)
+      )
   );
-
-  const appTools = args.tools.filter(
-    (tool: Record<string, any>) => !localMcpTools.includes(tool)
-  );
-
-  if (appTools.length === args.tools.length) {
-    return args;
-  }
 
   return {
     ...args,
@@ -195,9 +193,34 @@ export async function editImageWithMediaGateway({
   throw new Error("The image edit gateway returned no image");
 }
 
+let _cachedTitleModelId: string | null = null;
+let _titleModelResolvedAt = 0;
+
 export function getTitleModel() {
   if (isTestEnvironment && myProvider) {
     return myProvider.languageModel("title-model");
   }
-  return litellm.chatModel(DEFAULT_CHAT_MODEL);
+  // Use the cached healthy model id, refreshed every 60 seconds.
+  // The actual async resolution happens in refreshTitleModelId().
+  const modelId = _cachedTitleModelId || DEFAULT_CHAT_MODEL;
+  return litellm.chatModel(modelId);
+}
+
+/**
+ * Refresh the title model to the first healthy model from LiteLLM.
+ * Called from server-side routes; the result is cached for 60 seconds.
+ */
+export async function refreshTitleModelId(): Promise<string> {
+  const now = Date.now();
+  if (_cachedTitleModelId && now - _titleModelResolvedAt < 60_000) {
+    return _cachedTitleModelId;
+  }
+  try {
+    const { getFirstHealthyModelId } = await import("./litellm");
+    _cachedTitleModelId = await getFirstHealthyModelId();
+    _titleModelResolvedAt = now;
+  } catch {
+    // Keep existing cached value or fall back
+  }
+  return _cachedTitleModelId || DEFAULT_CHAT_MODEL;
 }

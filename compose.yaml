@@ -2,6 +2,9 @@ name: chatbot
 
 services:
   web:
+    build:
+      context: .
+      dockerfile: deploy/production/Dockerfile
     image: local/chatbot:latest
     ports:
       - "127.0.0.1:3000:3000"
@@ -11,7 +14,8 @@ services:
       AUTH_TRUST_HOST: "true"
       AUTH_URL: https://videohead.duckdns.org
       CHATBOT_DEPLOYMENT_LABEL: production
-      CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "true"
+      CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "false"
+      NEXT_PUBLIC_DEFAULT_CHAT_MODEL: "nvidia/nvidia/llama-3.3-nemotron-super-49b-v1"
       CHATBOT_MEDIA_ROOT: /app/media
       CHATBOT_MEMORY_ENABLED: "true"
       CHATBOT_LOG_BODIES: "false"

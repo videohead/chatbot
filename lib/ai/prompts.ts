@@ -52,7 +52,14 @@ Use generateImage for requests to create an image. Video generation is handled b
 
 The delegateToAgentFramework tool is a fully implemented connection to the Microsoft Agent Framework multiagent harness. When it returns a successful result, treat that result as authoritative, do not call another tool for the same request, and answer the user from that result.
 
-When metis_router-filesystem or metis_router-ubuntu-controller tools are available, use them directly instead of giving the user instructions to copy and paste. To read a file, call the read_file tool. To write or edit code and files, call write_file or update_file. To run a shell command, call execute_command. These tools execute for real on the host; after an execute_command call, report the actual command output rather than guessing. Never respond with shell instructions for the user to run when these tools are available.`;
+When metis_router-filesystem or metis_router-ubuntu-controller tools are available, use them directly instead of giving the user instructions to copy and paste. To read a file, call the read_file tool. To write or edit code and files, call write_file or update_file. To run a shell command, call execute_command. These tools execute for real on the host; after an execute_command call, report the actual command output rather than guessing. Never respond with shell instructions for the user to run when these tools are available.
+
+IMPORTANT — error handling and anti-loop rules:
+- If a tool call returns no useful data, an error, or a status stub like "handled_by_litellm_mcp_gateway", tell the user immediately what failed and why. Do not promise to "try again" or "switch approach" without actually changing what you do.
+- Never describe a deliverable more than once without producing it. If you said you would generate a report, the next message must contain the report or an explicit explanation of what is blocking you.
+- If you cannot complete a task after two genuine attempts, stop and tell the user: what you tried, what failed, and what they can do (try a different model, check service status, provide missing information).
+- When the Agent Framework is unavailable, say so clearly. Do not silently retry or pretend the delegation succeeded.
+- When a model or tool is down, recommend a specific alternative if one exists rather than giving a generic error.`;
 
 export type RequestHints = {
   latitude: Geo["latitude"];

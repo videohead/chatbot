@@ -82,6 +82,63 @@ import { type PostRequestBody, postRequestBodySchema } from "./schema";
 export const maxDuration = 600;
 
 const HEALTH_CHECK_DELAY_MS = 9000;
+
+/**
+ * Parse a LiteLLM or streaming error into a concise, user-facing message.
+ * LiteLLM wraps upstream failures in deeply nested escaped JSON; this
+ * extracts the actionable part so users (and models) can act on it.
+ */
+function formatStreamError(error: unknown): string {
+  const msg =
+    error instanceof Error ? error.message : String(error ?? "Unknown error");
+
+  // Model unavailable / connection error
+  const modelGroupMatch = msg.match(
+    /Received Model Group=(\S+).*?Available Model Group Fallbacks=(\S+)/s
+  );
+  if (modelGroupMatch) {
+    const model = modelGroupMatch[1];
+    const fallbacks = modelGroupMatch[2];
+    return fallbacks === "None"
+      ? `The model "${model}" is currently unavailable and no fallback models are configured. Try selecting a different model.`
+      : `The model "${model}" is unavailable. Falling back to: ${fallbacks}.`;
+  }
+
+  // LiteLLM internal / connection errors
+  if (msg.includes("Connection error") || msg.includes("ConnectionError")) {
+    return "The model backend is unreachable. It may be loading or temporarily down. Try again in a moment or choose a different model.";
+  }
+  if (msg.includes("RateLimitError") || msg.includes("rate_limit")) {
+    return "The model provider is rate-limiting requests. Please wait a moment and try again.";
+  }
+  if (msg.includes("AuthenticationError") || msg.includes("Unauthorized")) {
+    return "Authentication with the model provider failed. This is a server configuration issue.";
+  }
+  if (msg.includes("timeout") || msg.includes("Timeout")) {
+    return "The request timed out waiting for the model to respond. Try a shorter prompt or a different model.";
+  }
+  if (msg.includes("context_length_exceeded") || msg.includes("max_tokens")) {
+    return "The conversation is too long for this model's context window. Start a new chat or use a model with a larger context.";
+  }
+
+  // MCP / tool errors
+  if (msg.includes("MCP") || msg.includes("mcp")) {
+    return "A tool call failed through the MCP gateway. The tool server may be temporarily unavailable.";
+  }
+
+  // Agent framework errors
+  if (msg.includes("Agent Framework") || msg.includes("agent_framework")) {
+    return "The Agent Framework harness encountered an error. It may be unavailable or the backing model may be down.";
+  }
+
+  // Truncate long messages to something readable
+  if (msg.length > 200) {
+    return `An error occurred: ${msg.slice(0, 180)}…`;
+  }
+
+  return `An error occurred: ${msg}`;
+}
+
 const directMcpToolsEnabled =
   process.env.CHATBOT_ENABLE_DIRECT_MCP_TOOLS === "true";
 const workspaceToolNames = [
@@ -214,8 +271,20 @@ async function hydrateOwnedMediaForModel(
   )) as ChatMessage[];
 }
 
-const mcpGatewayHandledOutput = {
-  status: "handled_by_litellm_mcp_gateway",
+// LiteLLM's MCP gateway executes these server-side for OpenAI-hosted models.
+// When a deployment routes the tool call back to the client instead (seen
+// with Azure OpenAI deployments), the execute stub below runs and must fail
+// loudly: a fake success marker makes the model re-call the tool forever
+// until the context window is exhausted.
+const MCP_GATEWAY_CLIENT_SIDE_ERROR =
+  "This tool call was returned to the chatbot instead of being executed by the LiteLLM MCP gateway. The host filesystem was not touched. Tell the user this tool is unavailable for the current model deployment and answer from conversation context only. Do not call this tool again.";
+
+const mcpGatewayStubExecute = async (toolName: string) => {
+  logger.error("chat.tool.gateway_bounce", {
+    message: "MCP tool call bounced to client-side stub; failing the call",
+    toolName,
+  });
+  throw new Error(MCP_GATEWAY_CLIENT_SIDE_ERROR);
 };
 
 function createMessageMetadataHandler({
@@ -250,62 +319,62 @@ const stringInputSchema = (
   });
 
 const litellmMcpTools = {
-  "metis_router-filesystem:create_directory": dynamicTool({
+  "metis_router-filesystem__create_directory": dynamicTool({
     description: "Create a directory through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__create_directory"),
     inputSchema: stringInputSchema(["path"], {
       parents: { type: "boolean" },
       path: { type: "string" },
     }),
   }),
-  "metis_router-filesystem:delete_path": dynamicTool({
+  "metis_router-filesystem__delete_path": dynamicTool({
     description: "Delete a filesystem path through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__delete_path"),
     inputSchema: stringInputSchema(["path"], {
       path: { type: "string" },
       recursive: { type: "boolean" },
     }),
   }),
-  "metis_router-filesystem:execute_command": dynamicTool({
+  "metis_router-filesystem__execute_command": dynamicTool({
     description: "Execute a shell command through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__execute_command"),
     inputSchema: stringInputSchema(["command"], {
       command: { type: "string" },
       working_dir: { type: "string" },
     }),
   }),
-  "metis_router-filesystem:filesystem_diagnostics": dynamicTool({
+  "metis_router-filesystem__filesystem_diagnostics": dynamicTool({
     description: "Run filesystem diagnostics through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__filesystem_diagnostics"),
     inputSchema: stringInputSchema([], {
       path: { type: "string" },
       probe_write: { type: "boolean" },
     }),
   }),
-  "metis_router-filesystem:list_directory": dynamicTool({
+  "metis_router-filesystem__list_directory": dynamicTool({
     description: "List a directory through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__list_directory"),
     inputSchema: stringInputSchema(["path"], { path: { type: "string" } }),
   }),
-  "metis_router-filesystem:move_path": dynamicTool({
+  "metis_router-filesystem__move_path": dynamicTool({
     description: "Move a filesystem path through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__move_path"),
     inputSchema: stringInputSchema(["source", "destination"], {
       destination: { type: "string" },
       overwrite: { type: "boolean" },
       source: { type: "string" },
     }),
   }),
-  "metis_router-filesystem:read_file": dynamicTool({
+  "metis_router-filesystem__read_file": dynamicTool({
     description: "Read a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__read_file"),
     inputSchema: stringInputSchema(["file_path"], {
       file_path: { type: "string" },
     }),
   }),
-  "metis_router-filesystem:update_file": dynamicTool({
+  "metis_router-filesystem__update_file": dynamicTool({
     description: "Update a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__update_file"),
     inputSchema: stringInputSchema(["file_path", "old_string", "new_string"], {
       file_path: { type: "string" },
       new_string: { type: "string" },
@@ -313,45 +382,45 @@ const litellmMcpTools = {
       replace_all: { type: "boolean" },
     }),
   }),
-  "metis_router-filesystem:write_file": dynamicTool({
+  "metis_router-filesystem__write_file": dynamicTool({
     description: "Write a file through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-filesystem__write_file"),
     inputSchema: stringInputSchema(["file_path", "content"], {
       content: { type: "string" },
       create_dirs: { type: "boolean" },
       file_path: { type: "string" },
     }),
   }),
-  "metis_router-ubuntu-controller:get_job_status": dynamicTool({
+  "metis_router-ubuntu-controller__get_job_status": dynamicTool({
     description: "Get background job status through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__get_job_status"),
     inputSchema: stringInputSchema(["job_id"], { job_id: { type: "string" } }),
   }),
-  "metis_router-ubuntu-controller:get_system_info": dynamicTool({
+  "metis_router-ubuntu-controller__get_system_info": dynamicTool({
     description: "Get system information through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__get_system_info"),
     inputSchema: stringInputSchema([], {}),
   }),
-  "metis_router-ubuntu-controller:install_package": dynamicTool({
+  "metis_router-ubuntu-controller__install_package": dynamicTool({
     description: "Install a package through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__install_package"),
     inputSchema: stringInputSchema(["package_name"], {
       package_name: { type: "string" },
     }),
   }),
-  "metis_router-ubuntu-controller:list_background_jobs": dynamicTool({
+  "metis_router-ubuntu-controller__list_background_jobs": dynamicTool({
     description: "List background jobs through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__list_background_jobs"),
     inputSchema: stringInputSchema([], {}),
   }),
-  "metis_router-ubuntu-controller:search_packages": dynamicTool({
+  "metis_router-ubuntu-controller__search_packages": dynamicTool({
     description: "Search packages through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__search_packages"),
     inputSchema: stringInputSchema(["query"], { query: { type: "string" } }),
   }),
-  "metis_router-ubuntu-controller:start_background_job": dynamicTool({
+  "metis_router-ubuntu-controller__start_background_job": dynamicTool({
     description: "Start a background job through the LiteLLM MCP gateway.",
-    execute: async () => mcpGatewayHandledOutput,
+    execute: async () => mcpGatewayStubExecute("metis_router-ubuntu-controller__start_background_job"),
     inputSchema: stringInputSchema(["command"], {
       command: { type: "string" },
       working_dir: { type: "string" },
@@ -988,7 +1057,7 @@ export async function POST(request: Request) {
             modelId: chatModel,
             session,
           }),
-          delegateToAgentFramework: createAgentFrameworkTool(id),
+          delegateToAgentFramework: createAgentFrameworkTool(id, chatModel),
           editDocument: editDocument({ dataStream, session }),
           generateImage: createGenerateImageTool(session),
           generateVideo: createGenerateVideoTool(session, selectedVideoModel),
@@ -1004,7 +1073,7 @@ export async function POST(request: Request) {
             session,
           }),
           ...workspaceTools,
-          ...litellmMcpTools,
+          ...(directMcpToolsEnabled ? litellmMcpTools : {}),
         };
 
         const memoryQuery = message?.parts
@@ -1035,6 +1104,20 @@ export async function POST(request: Request) {
           }
         }
 
+        // Counts consecutive MCP gateway bounces (client-side stub runs) in
+        // this request; two in a row abort the stream with a user-visible
+        // notice so the model cannot loop until the context window fills.
+        let gatewayBounceCount = 0;
+        logger.info("chat.litellm.request", {
+          chatId: id,
+          gatewayToolsOffered: directMcpToolsEnabled
+            ? litellmMcpToolNames.length
+            : 0,
+          messageCount: modelMessages.length,
+          model: chatModel,
+          modelMessagesTokensHint: JSON.stringify(modelMessages).length,
+          workspaceToolsOffered: workspaceTools ? workspaceToolNames.length : 0,
+        });
         const result = streamText({
           activeTools: supportsTools
             ? [
@@ -1092,6 +1175,88 @@ export async function POST(request: Request) {
               model: chatModel,
             });
           },
+          onStepFinish(step) {
+            const toolCalls = step.toolCalls;
+            if (toolCalls && toolCalls.length > 0) {
+              for (const tc of toolCalls) {
+                const matchingResult = step.toolResults?.find(
+                  (tr) => tr.toolCallId === tc.toolCallId
+                );
+                const outputStr =
+                  matchingResult && "output" in matchingResult
+                    ? JSON.stringify(
+                        (matchingResult as { output: unknown }).output
+                      )
+                    : JSON.stringify(matchingResult ?? "");
+                const resultPreview = outputStr.slice(0, 300) || "no result";
+                // A bounced gateway call fails in the stub execute, which the
+                // SDK surfaces as a tool-error content part, not a toolResult.
+                const bouncedInContent = (step.content ?? []).some(
+                  (part) =>
+                    part.type === "tool-error" &&
+                    part.toolCallId === tc.toolCallId
+                );
+                const isStub =
+                  bouncedInContent ||
+                  outputStr.includes("handled_by_litellm_mcp_gateway") ||
+                  outputStr.includes("returned to the chatbot instead") ||
+                  outputStr === "{}" ||
+                  outputStr === '""' ||
+                  outputStr === "";
+                if (isStub) {
+                  gatewayBounceCount += 1;
+                  logger.warn("chat.tool.stub_result", {
+                    chatId: id,
+                    consecutiveBounces: gatewayBounceCount,
+                    model: chatModel,
+                    toolCallId: tc.toolCallId,
+                    toolName: tc.toolName,
+                    toolResult: resultPreview,
+                  });
+                  if (gatewayBounceCount === 1) {
+                    dataStream.write({
+                      data: {
+                        message:
+                          "A filesystem tool call is not reaching the LiteLLM MCP gateway for this model. If it repeats, the run will stop and explain.",
+                        modelId: chatModel,
+                        modelName,
+                        phase: "waiting",
+                      },
+                      type: "data-waiting-status",
+                    });
+                  }
+                  if (gatewayBounceCount >= 2) {
+                    logger.error("chat.tool.gateway_bounce_loop", {
+                      chatId: id,
+                      bounceCount: gatewayBounceCount,
+                      model: chatModel,
+                    });
+                    dataStream.write({
+                      data: {
+                        message:
+                          "Stopping: this model's deployment is not executing filesystem tools (calls keep returning to the app instead of running on the gateway). Ask for a different model or continue without filesystem tools.",
+                        modelId: chatModel,
+                        modelName,
+                        phase: "waiting",
+                      },
+                      type: "data-waiting-status",
+                    });
+                  }
+                } else {
+                  gatewayBounceCount = 0;
+                }
+                logger.info("chat.tool.call", {
+                  chatId: id,
+                  durationMs: Date.now() - startedAt,
+                  model: chatModel,
+                  toolArgs: JSON.stringify(tc.input).slice(0, 200),
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  toolResult: resultPreview,
+                });
+              }
+            }
+          },
           providerOptions: {
             ...(modelConfig?.gatewayOrder && {
               gateway: { order: modelConfig.gatewayOrder },
@@ -1106,8 +1271,32 @@ export async function POST(request: Request) {
             // its result prevents a chat model from retrying an expensive job
             // or silently substituting an image when video generation fails.
             hasToolCall("generateVideo"),
+            // MCP gateway tools are normally executed server-side by LiteLLM.
+            // When a deployment bounces them back to the app stub instead,
+            // allow one bounce step (so the model can explain the failure from
+            // the error result), then stop before it can loop indefinitely.
             ...(directMcpToolsEnabled
-              ? [hasToolCall(...litellmMcpToolNames)]
+              ? [
+                  ({
+                    steps,
+                  }: {
+                    steps: Array<{
+                      content: Array<{
+                        toolCallId?: string;
+                        toolName?: string;
+                        type: string;
+                      }>;
+                    }>;
+                  }) =>
+                    steps.filter((step) =>
+                      (step.content ?? []).some(
+                        (part) =>
+                          part.type === "tool-error" &&
+                          typeof part.toolName === "string" &&
+                          part.toolName.startsWith("metis_router-")
+                      )
+                    ).length >= 2,
+                ]
               : []),
           ],
           telemetry: {
@@ -1192,6 +1381,18 @@ export async function POST(request: Request) {
             })),
           });
         }
+        logger.info("chat.response.persisted", {
+          chatId: id,
+          durationMs: Date.now() - startedAt,
+          messageIds: finishedMessages.map((m) => m.id),
+          messageCount: finishedMessages.length,
+          roleSummary: finishedMessages
+            .map((m) => m.role)
+            .reduce<Record<string, number>>((acc, role) => {
+              acc[role] = (acc[role] ?? 0) + 1;
+              return acc;
+            }, {}),
+        });
 
         // Store large text and tool-output content as chat memory for
         // later retrieval. Failures are non-fatal; the chat still works.
@@ -1227,27 +1428,25 @@ export async function POST(request: Request) {
         }
       },
       onError: (error) => {
+        const userMessage = formatStreamError(error);
         logger.error("chat.response.error", {
           chatId: id,
           durationMs: Date.now() - startedAt,
           error,
+          userMessage,
         });
-
-        if (
-          error instanceof Error &&
-          error.message?.includes(
-            "AI Gateway requires a valid credit card on file to service requests"
-          )
-        ) {
-          return "AI Gateway requires a valid credit card on file to service requests. Please visit https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card to add a card and unlock your free credits.";
-        }
-        return "Oops, an error occurred!";
+        return userMessage;
       },
       originalMessages: isToolApprovalFlow ? uiMessages : undefined,
     });
 
     return createUIMessageStreamResponse({
       async consumeSseStream({ stream: sseStream }) {
+        logger.info("chat.response.stream_started", {
+          chatId: id,
+          durationMs: Date.now() - startedAt,
+          resumable: Boolean(process.env.REDIS_URL),
+        });
         if (!process.env.REDIS_URL) {
           // Keep a second consumer alive so an expensive tool call can finish
           // and createUIMessageStream.onEnd can persist its result even when

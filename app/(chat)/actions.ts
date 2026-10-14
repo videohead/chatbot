@@ -6,7 +6,7 @@ import { auth } from "@/app/(auth)/auth";
 import type { VisibilityType } from "@/components/chat/visibility-selector";
 import { titleModel } from "@/lib/ai/models";
 import { titlePrompt } from "@/lib/ai/prompts";
-import { getTitleModel } from "@/lib/ai/providers";
+import { getTitleModel, refreshTitleModelId } from "@/lib/ai/providers";
 import {
   deleteMessagesByChatIdAfterTimestamp,
   getChatById,
@@ -62,6 +62,7 @@ export async function generateTitleFromUserMessage({
   const fallbackTitle = localTitleFromText(prompt);
 
   try {
+    await refreshTitleModelId();
     const { text } = await generateText({
       instructions: titlePrompt,
       model: getTitleModel(),
