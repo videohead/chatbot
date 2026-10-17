@@ -7,25 +7,26 @@ const LITELLM_BASE_URL =
   process.env.LITELLM_BASE_URL ?? "http://litellm:4000/v1";
 const LITELLM_API_KEY = process.env.LITELLM_API_KEY ?? "not-needed";
 const MEDIA_LITELLM_BASE_URL =
-  process.env.MEDIA_LITELLM_BASE_URL ??
-  "http://media:4000/v1";
+  process.env.MEDIA_LITELLM_BASE_URL ?? "http://media:4000/v1";
 const MEDIA_LITELLM_API_KEY =
   process.env.MEDIA_LITELLM_MASTER_KEY ?? "not-configured";
 const LITELLM_MCP_SERVER = process.env.LITELLM_MCP_SERVER ?? "metis_router";
 const LITELLM_MCP_TOOL_PREFIX = `${LITELLM_MCP_SERVER}-`;
 const TOOL_CHOICE_COMPAT_MODELS = new Set(["azure/openai/gpt-5.4"]);
 
-function appendLitellmMcpGateway(args: Record<string, any>): Record<string, any> {
-  // Always append the MCP gateway block so LiteLLM discovers and exposes
-  // Metis Router tools to the model, regardless of whether local stub
-  // tools are registered. When CHATBOT_ENABLE_DIRECT_MCP_TOOLS is off,
-  // no local stubs exist but the gateway block still needs to be present.
+function prepareApplicationTools(
+  args: Record<string, any>
+): Record<string, any> {
+  if (!Array.isArray(args.tools)) {
+    return args;
+  }
   const tools = Array.isArray(args.tools) ? args.tools : [];
 
-  // Remove any local MCP stubs (if direct mode is on) -- the gateway
-  // handles execution server-side.
+  // Host tools belong to the harness. Never expose gateway tools that the
+  // SDK cannot execute, including when activeTools disables every app tool.
   const appTools = tools.filter(
     (tool: Record<string, any>) =>
+      tool?.type !== "mcp" &&
       !(
         tool?.type === "function" &&
         typeof tool.function?.name === "string" &&
@@ -33,22 +34,11 @@ function appendLitellmMcpGateway(args: Record<string, any>): Record<string, any>
       )
   );
 
-  return {
-    ...args,
-    tools: [
-      ...appTools,
-      {
-        require_approval: "never",
-        server_label: LITELLM_MCP_SERVER,
-        server_url: `litellm_proxy/mcp/${LITELLM_MCP_SERVER}`,
-        type: "mcp",
-      },
-    ],
-  };
+  return { ...args, tools: appTools };
 }
 
 function prepareLitellmRequestBody(args: Record<string, any>) {
-  const body = appendLitellmMcpGateway(args);
+  const body = prepareApplicationTools(args);
 
   // LiteLLM's Azure model metadata can reject tool_choice before forwarding
   // the request even though this deployment accepts OpenAI-compatible tools.

@@ -48,12 +48,24 @@ With the [AI SDK](https://ai-sdk.dev/docs/introduction), you can also switch to 
 
 ## Dependencies
 
-This fork adds two external services that are **required** for the Docker deployment to work:
+This fork uses these external services for model-backed host project work:
 
 - [LiteLLM](https://github.com/videohead/litellm) — model routing proxy. All model requests go through `LITELLM_BASE_URL`, authenticated with a client key supplied as a Docker secret.
 - [Metis Router](https://github.com/videohead/metis-router) — MCP gateway that exposes host tools (filesystem, shell, controllers) to the chatbot over the shared `metis-network`.
+- [Agent Framework service](../agent-framework-service/README.md) — executes
+  delegated host work, connects directly to Metis for tools, and uses LiteLLM
+  for model inference. The AI SDK executes chatbot-owned functions; the chatbot
+  provider does not inject LiteLLM MCP gateway tools.
 
-Both services must be running and attached to the `metis-network` Docker network before the chatbot starts. Credentials for models and infrastructure are provided at runtime via Docker secrets and `.env` files; no keys are stored in this repository.
+These services must be running and attached to the `metis-network` Docker
+network for host work. PostgreSQL supplies application persistence.
+Credentials for models and infrastructure are provided at runtime via Docker
+secrets and `.env` files; no keys are stored in this repository.
+
+See [host execution and deployment](DEPLOYMENT.md#host-project-execution) and
+[tool-chain logging and troubleshooting](docs/tool-chain-logging.md) before
+changing tool routing. An empty SDK tool list is not evidence that Metis has
+no tools, and a successful HTTP request is not proof of completed project work.
 
 ## Primary DGX Spark deployment
 

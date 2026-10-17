@@ -1,14 +1,23 @@
 # Tool chain logging
 
-The chatbot can run filesystem/system tools through the LiteLLM MCP gateway.
-That chain has three hops and three log streams. This page is the map: where
+The chatbot delegates host work to Agent Framework. Its provider never injects
+MCP gateway tools, including requests with no active application tools. Do not combine
+application function tools with gateway auto-execution: the gateway attempts
+to execute those functions too and feeds false tool failures to the model.
+This page is the map: where
 each log lives, which event names mark each hop, and how to trace one tool call
 end to end.
 
 ## The chain
 
 ```
-chatbot (Next.js route)
+chatbot (application tools executed by the AI SDK)
+  -> agent-framework :8000 (host implementation and validation)
+    -> metis-server :9999 -> upstream MCP servers
+    -> LiteLLM :4000 -> model providers
+
+External gateway clients (not the chatbot provider):
+gateway-only client
   -> LiteLLM proxy :4000  (chat.completions with tools: [{type: "mcp", ...}])
     -> metis-server :9999  (MCP router, aggregates upstream MCP servers)
       -> upstream MCP servers (ubuntu-controller, github, comfyui, docker-mcp...)
@@ -34,9 +43,11 @@ every tool-bearing request to fail with
 | chatbot | `/opt/chatbot/logs/chatbot-current.log` (symlink) and dated `chatbot-YYYY-MM-DD.log` | Bind mount `/opt/chatbot/logs`; entrypoint `scripts/docker-entrypoint.sh` tees stdout there |
 | LiteLLM | `docker logs litellm` | json-file driver, 10m x 3 rotation |
 | metis-router | `docker logs metis-server` | json-file driver, 10m x 3 rotation |
+| Agent Framework | `docker logs agent-framework` | json-file driver, 10m x 3 rotation; durable sessions in `/opt/agent-framework-service/data/sessions` |
 
-All three emit one-JSON-object-per-line logs with `event`, `level`, `service`,
-and `timestamp` fields (LiteLLM's own request logs use its standard format).
+Chatbot and Metis application events use `event`, `level`, `service`, and
+`timestamp`; Agent Framework uses `message` for the event name. LiteLLM's own
+request logs use its standard format.
 Timestamps are UTC ISO-8601, so a single tool call can be correlated across
 services by time window plus tool name.
 
@@ -52,14 +63,17 @@ Emitted by `app/(chat)/api/chat/route.ts` and `lib/logger.ts`.
 | `chat.litellm.request` | info | Outbound boundary to LiteLLM; includes `model`, `messageCount`, `gatewayToolsOffered`, `workspaceToolsOffered` |
 | `chat.tool.call` | info | A tool call completed (or failed) in this step; includes `toolName`, `toolArgs` (truncated), `toolResult` (truncated), `toolCallId`, `chatId` |
 | `chat.tool.gateway_bounce` | error | An MCP stub `execute` ran, meaning the deployment returned the tool call to the app instead of executing it on the gateway. The call is failed deliberately; the host was not touched |
-| `chat.tool.stub_result` | warn | Same bounce observed from the step-finish handler; includes `consecutiveBounces` counter |
-| `chat.tool.gateway_bounce_loop` | error | Second consecutive bounce. The run is stopped via `stopWhen` and the user is notified in-chat |
+| `chat.tool.stub_result` | warn | Empty/error tool result detected; includes `consecutiveBounces`. Inspect the actual error: this can be an SDK unknown tool, not a gateway failure |
+| `chat.tool.gateway_bounce_loop` | error | Repeated empty/error results detected. This historical event name does not prove the gateway failed; the MCP-specific stop condition is gated by direct mode |
 | `chat.stream.error` | error | The model stream failed; `error.error.message` usually contains the upstream provider's reason (context window exceeded, connection error, invalid request) |
 | `chat.response.error` | error | Terminal wrapper that surfaces to the UI as "An error occurred."; find the paired `chat.stream.error` for the real cause |
 | `chat.response.persisted` | info | Assistant messages saved to Postgres; includes `messageIds` and role summary |
 | `chat.response.stream_started` | info | SSE stream handed to the browser; `resumable` indicates Redis-backed resume |
 | `chat.title.fallback` | warn | Title generation failed (often the local `gpt-oss-20b` model being down); chat keeps a fallback title |
-| `agent_framework.delegate.start` / `.error` | info/error | The `delegateToAgentFramework` tool; `.error` includes the upstream 502 body with the underlying LiteLLM failure |
+| `agent_framework.delegate.start` / `.error` | info/error | The `delegateToAgentFramework` tool; `.error` includes the upstream HTTP failure or transport error |
+| `agent_framework.delegate.result` | info/warn | Harness outcome, finish reason, and pending-task count; incomplete or legacy/unverified results are warnings, not successful completion |
+| `agent_framework.delegate.duplicate` | warn | Repeated or parallel tool call in the same turn reused the existing execution; no new harness run |
+| `agent_framework.delegate.busy` | warn | The service rejected an overlapping conversation request with HTTP 409; wait for the active run, not an outage |
 
 ### metis-router (`service: "metis-router"`)
 
@@ -72,9 +86,45 @@ Emitted by `server/src/mcp-proxy.ts` via `mcpStructuredLog`.
 | `metis.tool.call.attempt_failed` | warn | One upstream attempt failed; includes `attempt`, `error` |
 | `metis.tool.call.failed` | error | Retries exhausted or non-transient failure; the tool result carries a structured `error` payload back to the caller |
 
-If a chatbot request shows a tool call but metis-router shows **no**
-`metis.tool.call.start`, the call never left LiteLLM: look for a gateway bounce
-(chatbot events above) or a LiteLLM-side failure.
+For delegated host work, follow `agent_framework.delegate.start` in the chatbot,
+`agent run started` in Agent Framework, and then `metis.tool.call.start`.
+No Metis event can mean the harness never called a host tool, not that the call
+was lost inside LiteLLM. In this path LiteLLM handles inference, not MCP execution.
+
+### Failure signatures and verification
+
+| Symptom | Check before concluding |
+| --- | --- |
+| `AI_NoSuchToolError`, `Available tools: .` | The SDK active-tool list is empty. Check `supportsTools` and the outbound request; do not inject MCP tools behind the SDK's back |
+| Model says delegation failed before the real result | Check for mixed application functions and LiteLLM MCP auto-execution; the gateway may have attempted a function owned by the chatbot |
+| HTTP 409 | A run already owns this conversation. No additional run was started; wait for it |
+| HTTP 200 with `status: incomplete` | Inspect pending tasks and partial changes; do not claim success or blindly replay the request |
+| `writable: true` from filesystem diagnostics | Permission checks passed, but only an explicit write/read probe can verify a write |
+
+Start with read-only health checks:
+
+```bash
+curl -fsS http://127.0.0.1:8000/ready
+curl -fsS http://127.0.0.1:8000/diagnostics
+curl -fsS 'http://127.0.0.1:9999/health?detail=true'
+docker logs --since=10m chatbot-web-1
+docker logs --since=10m agent-framework
+docker logs --since=10m metis-server
+```
+
+Readiness and loaded tool counts do not prove a task completed. Validate the
+streaming model -> SDK function -> harness -> Metis path with a synthetic
+request. For a read-only host check, delegate `filesystem__filesystem_diagnostics`
+with an explicit project path and `probe_write: false`, then inspect the actual
+tool result in the saved harness session. For write verification, use a unique
+temporary file in an approved location, read back exact bytes independently,
+and clean up only that file and any backup the tool created. Never use model
+narration as the evidence, or write test files into projects without approval.
+
+On 2026-10-16, Qwen 3.8 Flash Next passed streaming delegation and a read-only
+diagnostics call for `/opt/morphazoid`. No project file was written by that
+check. Synthetic host read/write/read and overlap-rejection checks also passed
+separately. These observations are not a guarantee of future service readiness.
 
 ### LiteLLM
 
@@ -84,10 +134,12 @@ LiteLLM keeps two layers of evidence. The quick layer is its stdout
 down vLLM container), and `Received Model Group=<model>` lines.
 
 The durable layer is the **database audit trail** in the `litellm` database on
-`litellm_db` (Postgres). Every completion and every MCP tool execution is a
+`litellm_db` (Postgres). Logged completions and gateway MCP executions have a
 row in `LiteLLM_SpendLogs` with `request_id`, `model`, `model_group`, `status`,
-`request_duration_ms`, token counts, spend, full `messages` and `response`
-payloads, and `mcp_namespaced_tool_name` for gateway tool calls. Query it with:
+`request_duration_ms`, token counts, spend, and `mcp_namespaced_tool_name` for
+gateway tool calls. `messages` and `response` may be empty or redacted; do not
+assume full request bodies are retained. Direct harness-to-Metis executions
+are not LiteLLM gateway calls. Query it with:
 
 ```bash
 # Recent requests, newest first
@@ -103,9 +155,9 @@ docker exec litellm_db psql -U llmproxy -d litellm -c \
 ```
 
 Rows with `mcp_namespaced_tool_name` set but `status` not `success` mark tool
-executions that failed inside LiteLLM's MCP handling. A chatbot `chat.tool.call`
-whose toolName appears nowhere in `SpendLogs` never reached LiteLLM's gateway
-(bounced to the client-side stub). Names before 2026-10-12 use the old
+executions that failed inside LiteLLM's MCP handling. Absence from this table
+does not imply a bounce: harness-to-Metis tools bypass LiteLLM execution.
+Names before 2026-10-12 use the old
 `server:tool` colon form; after, `server__tool`.
 
 `LiteLLM_AuditLog` additionally records proxy management actions (key
@@ -123,8 +175,8 @@ the failure is between them.
 | 2 | `chat.post.model_ready` | chatbot | Model resolved; `resolvedModel`, `supportsTools`, `capability` |
 | 3 | `chat.litellm.request` | chatbot | Outbound boundary: model, message count, gateway/workspace tool counts being offered |
 | 4 | (request row) | LiteLLM DB | `LiteLLM_SpendLogs` row with `request_id`, model_group, status, duration |
-| 5 | `agent_framework.delegate.start` / `.success` / `.error` | chatbot | Only when the model delegates to agent-framework; `.error` carries the upstream 502 body |
-| 6 | `metis.tool.call.start` / `.complete` / `.failed` | metis-router | Only for gateway tool calls; routed name, upstream server, attempt, duration |
+| 5 | `agent_framework.delegate.start` / `.result` / `.error` | chatbot | Only when the model delegates to agent-framework; `.result` distinguishes completed and incomplete execution; `.error` carries request failure details |
+| 6 | `metis.tool.call.start` / `.complete` / `.failed` | metis-router | Routed MCP execution from the harness or another MCP client; upstream server, attempt, duration |
 | 7 | `chat.tool.call` | chatbot | Per completed tool call in a step; args and result previews truncated |
 | 8 | `chat.stream.end` | chatbot | Model stream finished cleanly |
 | 9 | `chat.response.end` | chatbot | UI message stream assembled; final message count |
@@ -132,9 +184,10 @@ the failure is between them.
 | 11 | `chat.response.stream_started` | chatbot | SSE handed to the browser; `resumable` shows whether Redis-backed resume is active |
 
 Failure events that can appear instead of steps 8-11:
-`chat.tool.gateway_bounce` / `chat.tool.stub_result` (deployment bounced the
-tool call to the app), `chat.tool.gateway_bounce_loop` (run stopped at two
-bounces), `chat.stream.error` (model stream failed; `error.error.message`
+`chat.tool.gateway_bounce` (legacy stub executed),
+`chat.tool.stub_result` / `chat.tool.gateway_bounce_loop` (empty/error tool
+results, which need diagnosis rather than an assumed gateway outage),
+`chat.stream.error` (model stream failed; `error.error.message`
 holds the upstream reason), `chat.response.error` (terminal "An error
 occurred." wrapper), `chat.stream.persistence_consumer_error` (background SSE
 consumer failed; the visible stream may still be fine),
@@ -144,36 +197,29 @@ non-fatal).
 
 ## Tracing a failed tool call
 
-1. Find the failure in the chatbot log by chat id or time:
-   `grep 'chat.tool.gateway_bounce\|chat.tool.stub_result\|chat.stream.error' /opt/chatbot/logs/chatbot-current.log`
-2. Read the `model` field. If the bounce events fired, this model's deployment
-   did not execute tools server-side; the run stops after two bounces and the
-   user sees an explanation instead of an endless retry.
-3. For successful routing, confirm the middle hop in LiteLLM:
-   `docker logs litellm 2>&1 | grep <timestamp-minute>`
-4. Confirm execution at metis-router:
-   `docker logs metis-server 2>&1 | grep metis.tool`
-   A healthy call shows `start` then `complete` within milliseconds to seconds.
-   `attempt_failed` then `complete` means an upstream reconnected and retried.
-   `failed` means the upstream MCP server itself errored.
+1. Find the request in `docker logs chatbot-web-1` by chat ID/time. Check the
+   selected model's `supportsTools`, not just whether it generated tool calls.
+2. Check `agent_framework.delegate.start` and its matching result/error.
+   HTTP 409 means another run is active. Missing completion metadata means
+   unverified completion, not success.
+3. Follow the request/session ID in `docker logs agent-framework`. Confirm
+   the actual tool call and result. Inspect pending tasks on incomplete runs.
+4. Correlate `metis.tool.call.start` with `complete` or `failed` in
+   `docker logs metis-server`. A completed transport call can still contain
+   a tool-level error; inspect the payload.
+5. Check `docker logs litellm` separately for model inference failures. Only
+   gateway-only clients should require LiteLLM MCP execution records.
 
-## Loop protection (why runs stop at two bounces)
+## Loop and overlap protection
 
-The chatbot registers placeholder `dynamicTool` entries for the gateway tools
-(`app/(chat)/api/chat/route.ts`, the `litellmMcpTools` map). For deployments
-that execute MCP tools server-side, these stubs never run. When a deployment
-bounces a call back to the client, the stub:
+The current path shares one delegation promise per chat turn and rejects
+overlapping harness runs for a session with HTTP 409. Harness TODO
+continuation is bounded to three passes and eight minutes. The caller waits
+510 seconds; the route budget is 600 seconds.
 
-1. Logs `chat.tool.gateway_bounce` and throws an instructive error to the
-   model (do not retry, explain to the user).
-2. The step-finish handler counts bounces; the first writes a
-   `data-waiting-status` notice visible in the chat UI.
-3. A second bounce logs `chat.tool.gateway_bounce_loop`, writes a final UI
-   notice, and a `stopWhen` condition ends the run before the model can burn
-   the context window re-calling.
-
-Historical note: before 2026-10-14 the stubs returned a fake success marker
-and the loop stopped silently after one tool call, which surfaced as
-multi-minute "waiting" and eventually `ContextWindowExceededError`. If old
-logs show `chat.tool.stub_result` with `toolResult: '""'` and no
-`gateway_bounce` events, that conversation predates the fix.
+Legacy local MCP definitions remain in `litellmMcpTools` but production keeps
+direct mode disabled. Stub failures and their historical bounce notices are
+not a supported execution path. Their MCP-specific `stopWhen` guard only
+applies when direct mode is enabled; the general SDK step limit still applies.
+Do not infer that old empty-result logs predate a particular fix: the same
+signature can arise from unknown tools in a newer request.

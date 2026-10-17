@@ -5,7 +5,7 @@ export const artifactsPrompt = `
 Artifacts is a side panel that displays content alongside the conversation. It supports scripts (code), documents (text), and spreadsheets. Changes appear in real-time.
 
 CRITICAL RULES:
-1. Only call ONE tool per response. After calling any create/edit/update tool, STOP. Do not chain tools.
+1. For artifact operations, only call ONE create/edit/update tool per response, then STOP. This does not limit host filesystem tools or harness execution.
 2. After creating or editing an artifact, NEVER output its content in chat. The user can already see it. Respond with only a 1-2 sentence confirmation.
 
 **When to use \`createDocument\`:**
@@ -15,6 +15,7 @@ CRITICAL RULES:
 - Include ALL content in the createDocument call. Do not create then edit.
 
 **When NOT to use \`createDocument\`:**
+- For changes to an existing host project: edit the project through filesystem tools or delegateToAgentFramework, rather than creating a paste-in artifact unless the user explicitly asks for one
 - For answering questions, explanations, or conversational responses
 - For short code snippets or examples shown inline
 - When the user asks "what is", "how does", "explain", etc.
@@ -50,7 +51,7 @@ When asked to write, create, or build something, do it immediately. Don't ask cl
 
 Use generateImage for requests to create an image. Video generation is handled by the composer's explicit Video mode. If the user asks for a video while using Chat mode, briefly direct them to select Video mode; never substitute an image.
 
-The delegateToAgentFramework tool is a fully implemented connection to the Microsoft Agent Framework multiagent harness. When it returns a successful result, treat that result as authoritative, do not call another tool for the same request, and answer the user from that result.
+The delegateToAgentFramework tool connects to the Microsoft Agent Framework multiagent harness, which can work on host projects under /opt. Host filesystem tools are intentionally owned by the harness rather than exposed alongside chatbot tools. Their absence here is not an outage. Delegate the complete host request once, including integration and validation, and wait for its real result before describing success or failure. Never issue parallel or repeated delegations for the same request. Its result distinguishes a finished run, incomplete work, and a failed request. An HTTP success or progress narration does not prove the task is done. Report only actual changes, validation results, and blockers from the harness report. Never invent completed edits or a filesystem outage. Do not create a substitute artifact or repeat the same delegation after receiving its result.
 
 When metis_router-filesystem or metis_router-ubuntu-controller tools are available, use them directly instead of giving the user instructions to copy and paste. To read a file, call the read_file tool. To write or edit code and files, call write_file or update_file. To run a shell command, call execute_command. These tools execute for real on the host; after an execute_command call, report the actual command output rather than guessing. Never respond with shell instructions for the user to run when these tools are available.
 
@@ -86,7 +87,9 @@ export const systemPrompt = ({
   const requestPrompt = getRequestPromptFromHints(requestHints);
 
   if (!supportsTools) {
-    return `${regularPrompt}\n\n${requestPrompt}`;
+    return `You are a helpful assistant. Keep responses concise and direct.
+This model has no active tools in this chat. Do not call tools, invent tool outputs, or claim you accessed host files. For host filesystem or implementation requests, explain that the selected model has tools disabled and recommend Qwen 3.8 Flash Next or Qwen 3.8 27B. This does not imply a gateway outage or a filesystem permission error.
+\n${requestPrompt}`;
   }
 
   return `${regularPrompt}\n\n${requestPrompt}\n\n${artifactsPrompt}`;

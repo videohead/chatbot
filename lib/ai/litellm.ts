@@ -70,6 +70,9 @@ const DEFAULT_CAPABILITIES: ModelCapabilities = {
   vision: false,
 };
 
+// Verified function calling on this deployment; the generated catalog is stale.
+const TOOL_CAPABILITY_OVERRIDES = new Set(["nvidia/qwen/qwen3.8-flash-next"]);
+
 function readCatalog(): CatalogModel[] {
   const catalogPath = join(process.cwd(), "model-catalog.json");
   try {
@@ -98,7 +101,9 @@ function capabilitiesFor(
   if (catalog?.capabilities) {
     return {
       reasoning: catalog.capabilities.reasoning ?? false,
-      tools: catalog.capabilities.tools ?? false,
+      tools:
+        TOOL_CAPABILITY_OVERRIDES.has(id) ||
+        (catalog.capabilities.tools ?? false),
       vision: catalog.capabilities.vision ?? false,
     };
   }

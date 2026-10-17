@@ -120,27 +120,42 @@ No Redis, Celery, or external scheduler is needed. The single-host architecture 
 
 ## Current Work Needed
 
-### Critical: MCP Tool Execution -- Direct Mode Bug (Fixed 2026-10-12)
+### Current tool execution contract (verified 2026-10-16)
 
-**Root cause**: Two MCP tool execution paths exist in the chatbot:
+- The AI SDK executes chatbot-owned functions. Host work uses
+  `delegateToAgentFramework`, whose service connects directly to Metis for MCP
+  execution and separately to LiteLLM for inference.
+- `lib/ai/providers.ts` must not inject `type: "mcp"` tools, even when the
+  active application-tool list is empty. LiteLLM auto-execution attempts
+  chatbot-owned functions it cannot execute, feeding false failures to the
+  model. Injected host tools with an empty SDK list cause `AI_NoSuchToolError`;
+  neither error establishes a host filesystem outage.
+- Keep `CHATBOT_ENABLE_DIRECT_MCP_TOOLS=false`; the local MCP definitions are
+  failure stubs, not a host execution path.
+- Qwen 3.8 Flash Next supports function calls in this deployment despite its
+  stale catalog flag. The verified tool override in `lib/ai/litellm.ts` preserves
+  its other catalog capabilities. Truly tool-disabled models get no tools and
+  a no-tools prompt. Verify support with a synthetic function call before
+  adding model-specific overrides.
+- One turn shares one delegation execution. The harness returns HTTP 409 for
+  overlapping requests to the same session; wait rather than retrying.
+- Open todos continue for at most three harness passes and eight minutes.
+  The caller allows 510 seconds within the route's 600-second budget.
+- Inspect `status`, `pending_tasks`, `finish_reason`, and the final report.
+  HTTP 200 is not proof of completed integration or passing tests. Failed,
+  timed-out, and incomplete requests may already have changed files.
+- Never replace a failed host implementation with a paste-in artifact unless
+  the user requests it. Report actual edits, tests, and blockers, not progress
+  narration or assumptions.
 
-1. **Gateway path** (correct): `appendLitellmMcpGateway` in `lib/ai/providers.ts` transforms the request body, replacing individual `metis_router-*` tool definitions with a single `type: "mcp"` block. LiteLLM's MCP gateway intercepts tool calls server-side, executes them against Metis Router, and injects real results back into the model conversation. **This works correctly** -- verified end-to-end on 2026-10-12.
-
-2. **Direct mode** (broken): When `CHATBOT_ENABLE_DIRECT_MCP_TOOLS=true`, the chatbot also registers stub tool definitions in the AI SDK's `streamText` call. Every stub's `execute` returns `{"status": "handled_by_litellm_mcp_gateway"}` (`route.ts` line 217). The AI SDK calls these local stubs and feeds the useless response to the model. Additionally, `stopWhen: [hasToolCall(...litellmMcpToolNames)]` halts the stream after one MCP tool call per step.
-
-**Observed behavior** (session `4fdf0a07-5da2-4aad-8eaf-9283b42b5b8c`, GPT-5.5): Model called tools, got stubs back, looped across 7 turns promising to deliver a report it never produced.
-
-**Fix applied**: Set `CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "false"` in `compose.yaml`. With this off, the gateway path handles all MCP tool execution server-side. The `stopWhen` for MCP tools also deactivates, allowing models to chain multiple tool calls per turn.
-
-**Rebuild and restart required** to apply this change.
-
-**Remaining concern**: With direct mode off, MCP tool calls happen transparently inside LiteLLM and may not render as visible tool invocations in the chat UI. The model gets real results and can do real work, but the user may not see explicit "tool call" UI elements for MCP operations. If tool-call visibility in the UI matters, the long-term fix is to make the stub `execute` functions actually proxy to Metis Router (via an HTTP call to `http://metis-server:9999/mcp`) and return real results, rather than relying on the gateway path.
+See [deployment guidance](../../DEPLOYMENT.md) and the
+[tool-chain troubleshooting guide](../../docs/tool-chain-logging.md).
 
 ### Error Handling Across the Stack (Audited 2026-10-12)
 
 Error handling between the chatbot, LiteLLM, and Metis Router is currently weak at every layer. Failures are either silent, generic, or produce deeply nested error messages that neither models nor users can act on. This must improve before autonomous execution is viable -- an agent that can't interpret a failure can't recover from one.
 
-**Current state by layer:**
+**Historical pre-fix state (not the current execution contract):**
 
 | Layer | What happens on failure | What the user/model sees |
 |---|---|---|
