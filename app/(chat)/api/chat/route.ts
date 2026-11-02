@@ -1057,7 +1057,16 @@ export async function POST(request: Request) {
             modelId: chatModel,
             session,
           }),
-          delegateToAgentFramework: createAgentFrameworkTool(id, chatModel),
+          // Deliberately do not forward chatModel here: the harness's own
+          // resolve_model() health-checks LiteLLM and picks a known
+          // tool-capable, currently-healthy model for multi-step host work.
+          // Forwarding the chat picker's model would let a user's casual
+          // chat selection (or an unreliable provider) override that
+          // safeguard for sensitive filesystem/tool-calling runs.
+          delegateToAgentFramework: createAgentFrameworkTool(id, undefined, {
+            dataStream,
+            modelName,
+          }),
           editDocument: editDocument({ dataStream, session }),
           generateImage: createGenerateImageTool(session),
           generateVideo: createGenerateVideoTool(session, selectedVideoModel),

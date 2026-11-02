@@ -201,7 +201,7 @@ const PurePreviewMessage = ({
     (part) => part.type === "file"
   );
 
-  useDataStream();
+  const { waitingStatus } = useDataStream();
 
   const isUser = message.role === "user";
   const isAssistant = message.role === "assistant";
@@ -345,6 +345,70 @@ const PurePreviewMessage = ({
             </ToolContent>
           </Tool>
         </div>
+      );
+    }
+
+    if (type === "tool-delegateToAgentFramework") {
+      const { state, toolCallId, input } = part;
+      // The harness run can take several minutes with no AI SDK step finishing
+      // in between, so while it is running we surface the latest polled
+      // progress message (set via onProgress -> data-waiting-status) instead
+      // of leaving the tool card static and silent.
+      const isRunning = state === "input-available";
+      const liveMessage = isRunning ? waitingStatus?.message : undefined;
+      // callAgentFramework never throws: every failure path (HTTP error,
+      // timeout, unreachable service) is caught and returned as a descriptive
+      // string so the model can react to it. That means the AI SDK always
+      // reports state "output-available", which would otherwise render a
+      // misleading green "Completed" badge on a collapsed card for a run that
+      // actually failed. Detect those strings and render them as an error.
+      const outputText =
+        state === "output-available" && typeof part.output === "string"
+          ? part.output
+          : undefined;
+      const isFailure = Boolean(
+        outputText &&
+          (outputText.startsWith("Agent Framework returned HTTP") ||
+            outputText.startsWith("The Agent Framework request timed out.") ||
+            outputText.startsWith("The Agent Framework request failed"))
+      );
+      const displayState = isFailure ? "output-error" : state;
+
+      return (
+        <Tool
+          className="w-[min(100%,720px)]"
+          defaultOpen={state !== "output-available" || isFailure}
+          key={toolCallId}
+        >
+          <ToolHeader
+            state={displayState}
+            title="Agent Framework"
+            toolName="Agent Framework"
+            type="dynamic-tool"
+          />
+          <ToolContent>
+            {(state === "input-available" || state === "input-streaming") &&
+              input !== undefined && <ToolInput input={input} />}
+            {isRunning && (
+              <Shimmer
+                as="div"
+                className="text-muted-foreground text-sm"
+                duration={1}
+              >
+                {liveMessage ?? "Working on the delegated task..."}
+              </Shimmer>
+            )}
+            {state === "output-available" && isFailure && (
+              <ToolOutput errorText={outputText} output={undefined} />
+            )}
+            {state === "output-available" && !isFailure && (
+              <ToolOutput errorText={undefined} output={part.output} />
+            )}
+            {state === "output-error" && (
+              <ToolOutput errorText={part.errorText} output={undefined} />
+            )}
+          </ToolContent>
+        </Tool>
       );
     }
 

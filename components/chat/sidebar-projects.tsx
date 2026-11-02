@@ -10,6 +10,7 @@ import {
   GitBranch,
   Layers,
   type LucideIcon,
+  Music,
   Network,
 } from "lucide-react";
 import { useCallback } from "react";
@@ -57,6 +58,7 @@ const projects: Project[] = [
     icon: AudioWaveform,
     name: "AudioBrain",
   },
+  { href: `${serviceOrigin}/songbrain/`, icon: Music, name: "SongBrain" },
 ];
 
 export function SidebarProjects() {

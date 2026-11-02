@@ -62,6 +62,10 @@ let cache: LitellmState | null = null;
 const CAPABILITY_OVERRIDES: Record<string, ModelCapabilities> = {
   "gpt-4o": { reasoning: false, tools: true, vision: true },
   "gpt-oss-20b": { reasoning: true, tools: true, vision: false },
+  // NVIDIA Switchyard auto-router: judges each request and forwards to
+  // whichever backing model (nemotron_lightning / nemotron_ultra / gpt-5.5)
+  // fits, so advertise the superset of what those targets support.
+  "switchyard-auto": { reasoning: true, tools: true, vision: false },
 };
 
 const DEFAULT_CAPABILITIES: ModelCapabilities = {

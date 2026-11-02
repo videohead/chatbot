@@ -2,6 +2,7 @@ import type { InferUITool, UIMessage } from "ai";
 import { z } from "zod";
 import type { ArtifactKind } from "@/components/chat/artifact";
 import type { createDocument } from "./ai/tools/create-document";
+import type { createAgentFrameworkTool } from "./ai/tools/delegate-agent-framework";
 import type { createGenerateImageTool } from "./ai/tools/generate-image";
 import type { createGenerateVideoTool } from "./ai/tools/generate-video";
 import type { getWeather } from "./ai/tools/get-weather";
@@ -19,6 +20,9 @@ export type MessageMetadata = z.infer<typeof messageMetadataSchema>;
 
 type weatherTool = InferUITool<typeof getWeather>;
 type createDocumentTool = InferUITool<ReturnType<typeof createDocument>>;
+type delegateToAgentFrameworkTool = InferUITool<
+  ReturnType<typeof createAgentFrameworkTool>
+>;
 type generateImageTool = InferUITool<
   ReturnType<typeof createGenerateImageTool>
 >;
@@ -30,6 +34,7 @@ type requestSuggestionsTool = InferUITool<
   ReturnType<typeof requestSuggestions>
 >;
 export type ChatTools = {
+  delegateToAgentFramework: delegateToAgentFrameworkTool;
   generateImage: generateImageTool;
   generateVideo: generateVideoTool;
   getWeather: weatherTool;
