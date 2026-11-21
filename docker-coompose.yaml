@@ -11,7 +11,7 @@ services:
       AUTH_TRUST_HOST: "true"
       AUTH_URL: https://videohead.duckdns.org
       CHATBOT_DEPLOYMENT_LABEL: production
-      CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "false"
+      CHATBOT_ENABLE_DIRECT_MCP_TOOLS: "true"
       CHATBOT_MEDIA_ROOT: /app/media
       CHATBOT_MEMORY_ENABLED: "true"
       CHATBOT_LOG_BODIES: "false"
@@ -60,7 +60,6 @@ services:
         max-size: 25m
     networks:
       - default
-      - metis-network
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -77,5 +76,5 @@ secrets:
     file: /etc/chatbot/secrets/litellm-client.key
 
 networks:
-  metis-network:
+  -network:
     external: true
